@@ -19,15 +19,17 @@ Prerequisites are Node.js 22+, npm 11+, Rust 1.85+, and Wrangler 4+. Rust is onl
 
 ```bash
 npm install
+mkdir -p apps/api
 cp .env.example apps/api/.dev.vars
-npm run validate:config
+npm run validate:config -- apps/api/.dev.vars
 npm run check
 npm test
 ```
 
 Local D1 and R2 emulation use Wrangler and do not require cloud credentials. See `docs/deployment.md` before creating remote resources or secrets.
 
+The local shape check reports provider secrets as disabled. Before staging or production deployment, run `npm run validate:config -- <environment-file> --require-secrets` in a protected environment or verify the equivalent Wrangler secret bindings without printing their values.
+
 ## Delivery status
 
 Implementation follows the milestones in `PLAN.md`. External-provider validation remains an explicit release gate until disposable WorkOS, GitHub, and Cloudflare resources are supplied; see `docs/provider-validation.md`.
-
