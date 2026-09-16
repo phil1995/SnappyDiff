@@ -12,6 +12,7 @@ import { completeUpload, finalizeShard, getRunStatus, listShardUploads, register
 import { beginGitHubInstallationLink, handleGitHubWebhook, linkGitHubInstallation } from "./github.ts";
 import { decideComparison, getComparison } from "./reports.ts";
 import { exchangeGitHubOidc } from "./github-oidc.ts";
+import { getDashboardRun, getPrivateImage, listProjectRuns } from "./dashboard.ts";
 
 const API_PREFIX = "/api/v1";
 
@@ -96,6 +97,12 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
       execution.waitUntil(drainJobs(env, 10));
       return response;
     }
+    const runHistoryMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/run-history$/);
+    if (runHistoryMatch?.[1] && request.method === "GET") return listProjectRuns(env, session, runHistoryMatch[1], url.searchParams.get("before"));
+    const dashboardRunMatch = url.pathname.match(/^\/api\/v1\/dashboard\/runs\/([A-Za-z0-9_]+)$/);
+    if (dashboardRunMatch?.[1] && request.method === "GET") return getDashboardRun(env, session, dashboardRunMatch[1]);
+    const imageMatch = url.pathname.match(/^\/api\/v1\/images\/([A-Za-z0-9_]+)\/content$/);
+    if (imageMatch?.[1] && request.method === "GET") return getPrivateImage(env, session, imageMatch[1]);
     const projectMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)$/);
     if (projectMatch?.[1] && request.method === "GET") return getProject(env, session, projectMatch[1]);
     throw new HttpError(404, "route_not_found", "API route was not found");
