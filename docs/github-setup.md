@@ -11,9 +11,9 @@ Create a distinct GitHub App for staging and production. Configure the callback/
 
 Subscribe to `installation`, `installation_repositories`, `pull_request`, and `push`. Record the final permission/event inventory in the Milestone 0 validation evidence before enabling the App for customer repositories.
 
-Store the App private key and webhook secret as `GITHUB_APP_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET` Worker secrets. The Worker exchanges its short-lived App JWT for an installation token; installation tokens are never persisted.
+Store the App private key, webhook secret, and OAuth client secret as `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_OAUTH_CLIENT_SECRET` Worker secrets. Set the public App client ID as `GITHUB_OAUTH_CLIENT_ID`. The Worker exchanges its short-lived App JWT for an installation token; installation and user tokens are never persisted.
 
-After installing the App, an organization administrator calls the project installation-link endpoint with the numeric installation ID. The Worker verifies through GitHub that the installation can access the project's exact repository before persisting the tenant mapping.
+After installing the App, an organization administrator starts the project installation-link flow with the numeric installation ID, authorizes with GitHub, and completes the link with the returned code and signed state. The Worker verifies that the authenticated GitHub user can access that installation and that the installation includes the project's exact repository before persisting the tenant mapping.
 
 ## GitHub Actions OIDC
 

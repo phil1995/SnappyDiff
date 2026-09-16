@@ -47,10 +47,12 @@ export interface RunIdentity {
   mergeBaseSha?: string;
   observedDefaultHeadSha?: string;
   pullRequestNumber?: number;
+  pullRequestHeadSha?: string;
   expectedShards: string[];
   trustClass: "first_party" | "fork_isolated";
   parentShas: string[];
   graphComplete: boolean;
+  commitGraph: Array<{ sha: string; parentShas: string[]; complete: boolean }>;
 }
 
 export function isSha256(value: string): boolean {

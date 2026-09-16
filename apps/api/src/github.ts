@@ -1,4 +1,4 @@
-import { randomId, timingSafeEqual } from "./crypto.ts";
+import { randomId, signJson, timingSafeEqual, verifyJson } from "./crypto.ts";
 import { requirePermission } from "./authorization.ts";
 import type { Session } from "./auth.ts";
 import { HttpError, json, readBytes, readJson, type RequestContext } from "./http.ts";
@@ -6,6 +6,22 @@ import type { PendingJob } from "./jobs.ts";
 import type { Env } from "./platform.ts";
 
 const encoder = new TextEncoder();
+
+interface GitHubLinkState {
+  organizationId: string;
+  projectId: string;
+  userId: string;
+  installationId: number;
+  nonce: string;
+  exp: number;
+}
+
+function githubLinkSecret(env: Env): string {
+  if (!env.WORKOS_COOKIE_PASSWORD || env.WORKOS_COOKIE_PASSWORD.length < 32) {
+    throw new HttpError(503, "authentication_not_configured", "GitHub linking is not configured");
+  }
+  return env.WORKOS_COOKIE_PASSWORD;
+}
 
 interface GitHubCheckContext {
   id: string;
@@ -35,6 +51,8 @@ export async function ensureInProgressGitHubCheck(
   projectId: string,
   runId: string,
   pullRequestNumber: number,
+  headSha: string,
+  providerRunId: string,
   attemptNumber: number,
 ): Promise<void> {
   const installation = await env.DB.prepare(`
@@ -48,11 +66,23 @@ export async function ensureInProgressGitHubCheck(
   const proposedCheckId = randomId("ghc");
   await env.DB.batch([
     env.DB.prepare(`
-      INSERT INTO github_check_owners (organization_id, project_id, scope_key, run_id, attempt_number)
-      VALUES (?, ?, ?, ?, ?) ON CONFLICT (organization_id, project_id, scope_key) DO UPDATE SET
-        run_id = excluded.run_id, attempt_number = excluded.attempt_number, updated_at = unixepoch()
-      WHERE excluded.attempt_number >= github_check_owners.attempt_number
-    `).bind(organizationId, projectId, scopeKey, runId, attemptNumber),
+      INSERT INTO github_check_owners
+        (organization_id, project_id, scope_key, run_id, attempt_number, head_sha, provider_run_id)
+      SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM pull_requests WHERE organization_id = ? AND project_id = ? AND number = ?
+          AND state = 'open' AND head_sha = ?
+      ) ON CONFLICT (organization_id, project_id, scope_key) DO UPDATE SET
+        run_id = excluded.run_id, attempt_number = excluded.attempt_number, head_sha = excluded.head_sha,
+        provider_run_id = excluded.provider_run_id, updated_at = unixepoch()
+      WHERE excluded.head_sha = (SELECT head_sha FROM pull_requests
+              WHERE organization_id = excluded.organization_id AND project_id = excluded.project_id
+                AND number = ? AND state = 'open')
+        AND (github_check_owners.head_sha IS NULL OR github_check_owners.head_sha != excluded.head_sha
+          OR CAST(excluded.provider_run_id AS INTEGER) > CAST(COALESCE(github_check_owners.provider_run_id, '0') AS INTEGER)
+          OR (excluded.provider_run_id = github_check_owners.provider_run_id
+            AND excluded.attempt_number >= github_check_owners.attempt_number))
+    `).bind(organizationId, projectId, scopeKey, runId, attemptNumber, headSha, providerRunId,
+      organizationId, projectId, pullRequestNumber, headSha, pullRequestNumber),
     env.DB.prepare(`
       INSERT INTO github_checks (id, organization_id, project_id, run_id, installation_id, scope_key)
       SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (
@@ -98,11 +128,16 @@ async function githubRequest<T>(env: Env, path: string, init: RequestInit = {}, 
     const response = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
       method: "POST",
       headers: githubHeaders(bearer),
+      signal: AbortSignal.timeout(30_000),
     });
     if (!response.ok) throw new Error(`GitHub installation token request failed: ${response.status}`);
     bearer = ((await response.json()) as { token: string }).token;
   }
-  const response = await fetch(`https://api.github.com${path}`, { ...init, headers: { ...githubHeaders(bearer), ...(init.headers as Record<string, string> | undefined) } });
+  const response = await fetch(`https://api.github.com${path}`, {
+    ...init,
+    signal: init.signal ?? AbortSignal.timeout(30_000),
+    headers: { ...githubHeaders(bearer), ...(init.headers as Record<string, string> | undefined) },
+  });
   if (!response.ok) throw new Error(`GitHub API request failed: ${response.status}`);
   return response.status === 204 ? (undefined as T) : (await response.json()) as T;
 }
@@ -123,15 +158,27 @@ export async function classifyPullRequestFork(
   owner: string,
   repository: string,
   pullRequestNumber: number,
-): Promise<boolean> {
-  const pull = await githubRequest<{ head: { repo: { full_name: string } | null }; base: { repo: { full_name: string } } }>(
+): Promise<{ fork: boolean; headSha: string; baseSha: string; mergeCommitSha: string | null; updatedAt: number; state: "open" | "closed" }> {
+  const pull = await githubRequest<{
+    head: { sha: string; repo: { full_name: string } | null };
+    base: { sha: string; repo: { full_name: string } };
+    merge_commit_sha: string | null;
+    updated_at: string;
+    state: "open" | "closed";
+  }>(
     env,
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls/${pullRequestNumber}`,
     {},
     installationId,
   );
-  if (!pull.head.repo) return true;
-  return pull.head.repo.full_name.toLowerCase() !== pull.base.repo.full_name.toLowerCase();
+  return {
+    fork: !pull.head.repo || pull.head.repo.full_name.toLowerCase() !== pull.base.repo.full_name.toLowerCase(),
+    headSha: pull.head.sha,
+    baseSha: pull.base.sha,
+    mergeCommitSha: pull.merge_commit_sha,
+    updatedAt: Number.isFinite(new Date(pull.updated_at).getTime()) ? new Date(pull.updated_at).getTime() : 0,
+    state: pull.state,
+  };
 }
 
 export async function deliverGitHubCheckJob(env: Env, job: PendingJob): Promise<void> {
@@ -149,6 +196,15 @@ export async function deliverGitHubCheckJob(env: Env, job: PendingJob): Promise<
      WHERE gc.id = ? AND gc.organization_id = ?
   `).bind(checkId, job.organization_id).first<GitHubCheckContext>();
   if (!check || check.owner_run_id !== check.run_id || check.delivered_version >= check.desired_version) return;
+  const leaseOwner = randomId("ghlease");
+  const lease = await env.DB.prepare(`
+    UPDATE github_checks SET delivery_lease_owner = ?, delivery_lease_expires_at = unixepoch() + 300,
+      state = 'delivering', updated_at = unixepoch()
+     WHERE id = ? AND organization_id = ? AND desired_version = ?
+       AND (delivery_lease_owner IS NULL OR delivery_lease_expires_at < unixepoch())
+  `).bind(leaseOwner, check.id, check.organization_id, check.desired_version).run();
+  if (Number(lease.meta?.["changes"] ?? 0) !== 1) throw new Error("GitHub check delivery is already leased");
+  try {
   const installationId = Number(check.installation_id);
   let remoteId = check.github_check_id;
   if (!remoteId) {
@@ -184,10 +240,26 @@ export async function deliverGitHubCheckJob(env: Env, job: PendingJob): Promise<
       { method: "POST", body: JSON.stringify(payload) }, installationId);
     remoteId = created.id;
   }
-  await env.DB.prepare(`
+  const saved = await env.DB.prepare(`
     UPDATE github_checks SET github_check_id = ?, delivered_version = desired_version, state = 'delivered',
-      last_error = NULL, updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND desired_version = ?
-  `).bind(remoteId, check.id, check.organization_id, check.desired_version).run();
+      last_error = NULL, delivery_lease_owner = NULL, delivery_lease_expires_at = NULL, updated_at = unixepoch()
+     WHERE id = ? AND organization_id = ? AND desired_version = ? AND delivery_lease_owner = ?
+  `).bind(remoteId, check.id, check.organization_id, check.desired_version, leaseOwner).run();
+  if (Number(saved.meta?.["changes"] ?? 0) !== 1) {
+    await env.DB.prepare(`
+      UPDATE github_checks SET delivery_lease_owner = NULL, delivery_lease_expires_at = NULL,
+        state = 'pending', updated_at = unixepoch()
+       WHERE id = ? AND organization_id = ? AND delivery_lease_owner = ?
+    `).bind(check.id, check.organization_id, leaseOwner).run();
+  }
+  } catch (error) {
+    await env.DB.prepare(`
+      UPDATE github_checks SET delivery_lease_owner = NULL, delivery_lease_expires_at = NULL,
+        state = 'pending', last_error = ?, updated_at = unixepoch()
+       WHERE id = ? AND organization_id = ? AND delivery_lease_owner = ?
+    `).bind(String(error).slice(0, 2000), check.id, check.organization_id, leaseOwner).run();
+    throw error;
+  }
 }
 
 export async function refreshGitHubStateJob(env: Env, job: PendingJob): Promise<void> {
@@ -241,6 +313,9 @@ export async function handleGitHubWebhook(request: Request, env: Env): Promise<R
   }
   if (eventName === "pull_request" && payload["repository"] && payload["pull_request"]) {
     const installationId = Number(payload["installation"]?.id ?? 0);
+    const pullNumber = Number(payload["number"]);
+    const currentPull = await classifyPullRequestFork(env, installationId,
+      String(payload["repository"].owner?.login), String(payload["repository"].name), pullNumber);
     const mappings = await env.DB.prepare(`
       SELECT organization_id FROM github_installations WHERE installation_id = ?
        AND repository_owner = ? AND repository_name = ?
@@ -249,17 +324,17 @@ export async function handleGitHubWebhook(request: Request, env: Env): Promise<R
       const project = await env.DB.prepare("SELECT id FROM projects WHERE organization_id = ? AND repository_owner = ? AND repository_name = ?")
         .bind(mapping.organization_id, String(payload["repository"].owner?.login), String(payload["repository"].name)).first<{ id: string }>();
       if (!project) continue;
-      const state = payload["pull_request"].state === "open" ? "open" : "closed";
-      await env.DB.prepare(`
-        INSERT INTO pull_requests (organization_id, project_id, number, state, head_sha, base_sha, installation_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, project_id, number) DO UPDATE SET
+      const updated = await env.DB.prepare(`
+        INSERT INTO pull_requests (organization_id, project_id, number, state, head_sha, base_sha, installation_id, github_updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, project_id, number) DO UPDATE SET
           state = excluded.state, head_sha = excluded.head_sha, base_sha = excluded.base_sha,
-          installation_id = excluded.installation_id, updated_at = unixepoch()
-      `).bind(mapping.organization_id, project.id, Number(payload["number"]), state,
-        String(payload["pull_request"].head?.sha ?? ""), String(payload["pull_request"].base?.sha ?? ""), installationId).run();
-      if (state === "closed") {
+          installation_id = excluded.installation_id, github_updated_at = excluded.github_updated_at, updated_at = unixepoch()
+        WHERE excluded.github_updated_at >= pull_requests.github_updated_at
+      `).bind(mapping.organization_id, project.id, pullNumber, currentPull.state,
+        currentPull.headSha, currentPull.baseSha, installationId, currentPull.updatedAt).run();
+      if (currentPull.state === "closed" && Number(updated.meta?.["changes"] ?? 0) === 1) {
         await env.DB.prepare("UPDATE retention_pins SET released_at = unixepoch() WHERE organization_id = ? AND owner_type = 'open_pull_request' AND owner_id = ? AND released_at IS NULL")
-          .bind(mapping.organization_id, `pr:${Number(payload["number"])}`).run();
+          .bind(mapping.organization_id, `${project.id}:pr:${pullNumber}`).run();
       }
     }
   }
@@ -298,17 +373,48 @@ export async function linkGitHubInstallation(
   context: RequestContext,
 ): Promise<Response> {
   requirePermission(session, "projects:admin");
-  const body = await readJson<{ installationId?: unknown }>(request);
-  if (!Number.isSafeInteger(body.installationId) || Number(body.installationId) <= 0) throw new HttpError(400, "invalid_installation", "installationId must be a positive integer");
+  if (!env.GITHUB_OAUTH_CLIENT_SECRET || !env.GITHUB_OAUTH_CLIENT_ID) throw new HttpError(503, "github_oauth_not_configured", "GitHub OAuth is not configured");
+  const body = await readJson<{ code?: unknown; state?: unknown }>(request);
+  if (typeof body.code !== "string" || typeof body.state !== "string") throw new HttpError(400, "invalid_github_callback", "GitHub OAuth code and state are required");
+  const state = await verifyJson<GitHubLinkState>(body.state, githubLinkSecret(env));
+  if (!state || state.exp < Date.now() / 1000 || state.organizationId !== session.organizationId
+    || state.projectId !== projectId || state.userId !== session.userId) {
+    throw new HttpError(400, "invalid_github_state", "GitHub linking state is invalid or expired");
+  }
   const project = await env.DB.prepare("SELECT repository_owner, repository_name FROM projects WHERE id = ? AND organization_id = ? AND deleted_at IS NULL")
     .bind(projectId, session.organizationId).first<{ repository_owner: string; repository_name: string }>();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
-  const installationId = Number(body.installationId);
-  const repositories = await githubRequest<{ repositories: Array<{ name: string; owner: { login: string } }> }>(env, "/installation/repositories?per_page=100", {}, installationId);
-  if (!repositories.repositories.some((repo) => repo.name === project.repository_name && repo.owner.login.toLowerCase() === project.repository_owner.toLowerCase())) {
+  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json", "user-agent": "SnappyDiff" },
+    body: JSON.stringify({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code: body.code }),
+  });
+  if (!tokenResponse.ok) throw new HttpError(401, "github_oauth_failed", "GitHub rejected the authorization code");
+  const tokenPayload = await tokenResponse.json() as { access_token?: string; error?: string };
+  if (!tokenPayload.access_token) throw new HttpError(401, "github_oauth_failed", "GitHub authorization did not grant installation access");
+  const installationId = state.installationId;
+  let repositoryInstalled = false;
+  for (let page = 1; page <= 10 && !repositoryInstalled; page++) {
+    const repositoriesResponse = await fetch(`https://api.github.com/user/installations/${installationId}/repositories?per_page=100&page=${page}`, {
+      headers: githubHeaders(tokenPayload.access_token),
+    });
+    if (!repositoriesResponse.ok) throw new HttpError(403, "installation_ownership_failed", "The GitHub user cannot access this installation");
+    const repositories = await repositoriesResponse.json() as { repositories: Array<{ name: string; owner: { login: string } }> };
+    repositoryInstalled = repositories.repositories.some((repo) => repo.name === project.repository_name
+      && repo.owner.login.toLowerCase() === project.repository_owner.toLowerCase());
+    if (repositories.repositories.length < 100) break;
+  }
+  if (!repositoryInstalled) {
     throw new HttpError(403, "repository_not_installed", "GitHub App installation does not include this repository");
   }
-  await env.DB.batch([
+  const permissionResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(project.repository_owner)}/${encodeURIComponent(project.repository_name)}`, {
+    headers: githubHeaders(tokenPayload.access_token),
+  });
+  if (!permissionResponse.ok || !((await permissionResponse.json()) as { permissions?: { admin?: boolean } }).permissions?.admin) {
+    throw new HttpError(403, "installation_ownership_failed", "The GitHub user must administer the repository to link its installation");
+  }
+  try {
+    await env.DB.batch([
     env.DB.prepare(`
       INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)
@@ -318,6 +424,42 @@ export async function linkGitHubInstallation(
       INSERT INTO audit_events (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
       VALUES (?, ?, ?, 'github.installation_linked', 'project', ?, ?, ?)
     `).bind(randomId("aud"), session.organizationId, session.userId, projectId, context.requestId, JSON.stringify({ installationId })),
-  ]);
+    ]);
+  } catch (error) {
+    if (String(error).includes("UNIQUE")) {
+      throw new HttpError(409, "installation_already_linked", "This GitHub installation repository is already linked to another organization");
+    }
+    throw error;
+  }
   return json({ linked: true });
+}
+
+export async function beginGitHubInstallationLink(
+  request: Request,
+  env: Env,
+  session: Session,
+  projectId: string,
+): Promise<Response> {
+  requirePermission(session, "projects:admin");
+  if (!env.GITHUB_OAUTH_CLIENT_ID) throw new HttpError(503, "github_oauth_not_configured", "GitHub OAuth is not configured");
+  const body = await readJson<{ installationId?: unknown }>(request);
+  if (!Number.isSafeInteger(body.installationId) || Number(body.installationId) <= 0) {
+    throw new HttpError(400, "invalid_installation", "installationId must be a positive integer");
+  }
+  const project = await env.DB.prepare("SELECT 1 AS found FROM projects WHERE id = ? AND organization_id = ? AND deleted_at IS NULL")
+    .bind(projectId, session.organizationId).first();
+  if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
+  const state: GitHubLinkState = {
+    organizationId: session.organizationId,
+    projectId,
+    userId: session.userId,
+    installationId: Number(body.installationId),
+    nonce: randomId("ghstate"),
+    exp: Math.floor(Date.now() / 1000) + 600,
+  };
+  const authorizationUrl = new URL("https://github.com/login/oauth/authorize");
+  authorizationUrl.searchParams.set("client_id", env.GITHUB_OAUTH_CLIENT_ID);
+  authorizationUrl.searchParams.set("redirect_uri", `${env.APP_ORIGIN}/github/callback`);
+  authorizationUrl.searchParams.set("state", await signJson(state, githubLinkSecret(env)));
+  return json({ authorizationUrl: authorizationUrl.toString() });
 }

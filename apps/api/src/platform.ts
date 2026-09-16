@@ -63,12 +63,14 @@ export interface Env {
   WORKOS_REDIRECT_URI: string;
   GITHUB_APP_ID: string;
   GITHUB_APP_SLUG: string;
+  GITHUB_OAUTH_CLIENT_ID: string;
   R2_BUCKET_NAME: string;
   WORKOS_API_KEY?: string;
   WORKOS_WEBHOOK_SECRET?: string;
   WORKOS_COOKIE_PASSWORD?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_WEBHOOK_SECRET?: string;
+  GITHUB_OAUTH_CLIENT_SECRET?: string;
   TOKEN_PEPPER?: string;
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;

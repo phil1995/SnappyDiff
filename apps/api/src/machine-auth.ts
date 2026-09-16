@@ -9,6 +9,16 @@ export interface MachinePrincipal {
   projectId: string;
   scopes: string[];
   trustClass: "first_party" | "fork_isolated";
+  runConstraints?: OidcRunConstraints;
+}
+
+export interface OidcRunConstraints {
+  providerRunId: string;
+  attemptNumber: number;
+  commitSha: string;
+  branch: string;
+  pullRequestNumber?: number;
+  pullRequestHeadSha?: string;
 }
 
 export interface OidcMachineGrant {
@@ -17,6 +27,7 @@ export interface OidcMachineGrant {
   projectId: string;
   scopes: string[];
   trustClass: "first_party" | "fork_isolated";
+  runConstraints: OidcRunConstraints;
   exp: number;
 }
 
@@ -27,7 +38,10 @@ export async function requireMachinePrincipal(request: Request, env: Env): Promi
   const token = authorization.slice("Bearer ".length);
   if (token.startsWith("sd_oidc_")) {
     const grant = await verifyJson<OidcMachineGrant>(token.slice("sd_oidc_".length), env.TOKEN_PEPPER);
-    if (!grant || grant.exp < Date.now() / 1000 || !grant.scopes.includes("runs:create")) {
+    if (!grant || grant.exp < Date.now() / 1000 || !Array.isArray(grant.scopes) || !grant.scopes.includes("runs:create")
+      || !grant.runConstraints || typeof grant.runConstraints.providerRunId !== "string"
+      || !Number.isSafeInteger(grant.runConstraints.attemptNumber)
+      || typeof grant.runConstraints.commitSha !== "string" || typeof grant.runConstraints.branch !== "string") {
       throw new HttpError(401, "invalid_oidc_credential", "OIDC credential is invalid or expired");
     }
     return { kind: "token", ...grant };

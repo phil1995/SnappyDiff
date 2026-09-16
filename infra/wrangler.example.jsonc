@@ -33,6 +33,7 @@
     "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback",
     "GITHUB_APP_ID": "0",
     "GITHUB_APP_SLUG": "snappydiff-local",
+    "GITHUB_OAUTH_CLIENT_ID": "replace-with-github-client-id",
     "R2_BUCKET_NAME": "snappydiff-local-images",
     "CLOUDFLARE_ACCOUNT_ID": "local-not-used",
     "GITHUB_OIDC_AUDIENCE": "snappydiff"
@@ -56,6 +57,7 @@
         "WORKOS_REDIRECT_URI": "https://staging.example.invalid/auth/callback",
         "GITHUB_APP_ID": "replace-with-staging-app-id",
         "GITHUB_APP_SLUG": "replace-with-staging-app-slug",
+        "GITHUB_OAUTH_CLIENT_ID": "replace-with-staging-github-client-id",
         "R2_BUCKET_NAME": "snappydiff-staging-images",
         "CLOUDFLARE_ACCOUNT_ID": "replace-with-cloudflare-account-id",
         "GITHUB_OIDC_AUDIENCE": "snappydiff-staging"
@@ -79,6 +81,7 @@
         "WORKOS_REDIRECT_URI": "https://app.example.invalid/auth/callback",
         "GITHUB_APP_ID": "replace-with-production-app-id",
         "GITHUB_APP_SLUG": "replace-with-production-app-slug",
+        "GITHUB_OAUTH_CLIENT_ID": "replace-with-production-github-client-id",
         "R2_BUCKET_NAME": "snappydiff-production-images",
         "CLOUDFLARE_ACCOUNT_ID": "replace-with-cloudflare-account-id",
         "GITHUB_OIDC_AUDIENCE": "snappydiff-production"

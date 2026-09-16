@@ -9,7 +9,7 @@ import { handleWorkOSWebhook } from "./workos-webhook.ts";
 import { requireMachinePrincipal } from "./machine-auth.ts";
 import { handleLocalUpload } from "./upload-urls.ts";
 import { completeUpload, finalizeShard, getRunStatus, listShardUploads, registerRun, submitManifestPage } from "./uploads.ts";
-import { handleGitHubWebhook, linkGitHubInstallation } from "./github.ts";
+import { beginGitHubInstallationLink, handleGitHubWebhook, linkGitHubInstallation } from "./github.ts";
 import { decideComparison, getComparison } from "./reports.ts";
 import { exchangeGitHubOidc } from "./github-oidc.ts";
 
@@ -85,6 +85,8 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
       if (request.method === "POST") return createProject(request, env, session, context);
     }
     const installationLink = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/github-installation$/);
+    const installationAuthorize = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/github-installation\/authorize$/);
+    if (installationAuthorize?.[1] && request.method === "POST") return beginGitHubInstallationLink(request, env, session, installationAuthorize[1]);
     if (installationLink?.[1] && request.method === "POST") return linkGitHubInstallation(request, env, session, installationLink[1], context);
     const comparisonMatch = url.pathname.match(/^\/api\/v1\/comparisons\/([A-Za-z0-9_]+)$/);
     if (comparisonMatch?.[1] && request.method === "GET") return getComparison(env, session, comparisonMatch[1], url.searchParams.get("after"));

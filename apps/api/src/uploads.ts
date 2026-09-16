@@ -31,8 +31,9 @@ export async function registerRun(
   projectId: string,
 ): Promise<Response> {
   assertProject(principal, projectId);
-  const body = await readJson<RegisterRunBody>(request);
+  const body = await readJson<RegisterRunBody>(request, 512 * 1024);
   const identity = validateIdentity(body.identity);
+  enforceRunConstraints(principal, identity);
   if (principal.trustClass === "fork_isolated" && identity.trustClass !== "fork_isolated") {
     throw new HttpError(403, "trust_class_violation", "Fork credentials can create only isolated runs");
   }
@@ -44,31 +45,32 @@ export async function registerRun(
      WHERE p.id = ? AND p.organization_id = ? AND p.deleted_at IS NULL
   `).bind(projectId, principal.organizationId).first<{ id: string; suite_id: string }>();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
-  await persistCommitGraph(env, principal.organizationId, projectId, identity);
+  if (principal.trustClass === "first_party") await persistCommitGraph(env, principal.organizationId, projectId, identity);
   const proposedRunId = randomId("run");
   const deadline = Math.floor(Date.now() / 1000) + LIMITS.unfinishedRunSeconds;
   const inserted = await env.DB.prepare(`
     INSERT INTO runs
       (id, organization_id, project_id, suite_id, provider, provider_run_id, attempt_number, run_key,
-       commit_sha, branch, merge_base_sha, observed_default_head_sha, pull_request_number, trust_class,
+       commit_sha, branch, merge_base_sha, observed_default_head_sha, pull_request_number, pull_request_head_sha, trust_class,
        expected_shards_json, allow_empty, deadline_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (organization_id, project_id, provider, provider_run_id, attempt_number) DO NOTHING
   `).bind(
     proposedRunId, principal.organizationId, projectId, project.suite_id, identity.provider, identity.providerRunId,
     identity.attemptNumber, identity.runKey, identity.commitSha, identity.branch, identity.mergeBaseSha ?? null,
-    identity.observedDefaultHeadSha ?? null, identity.pullRequestNumber ?? null, identity.trustClass,
+    identity.observedDefaultHeadSha ?? null, identity.pullRequestNumber ?? null, identity.pullRequestHeadSha ?? null, identity.trustClass,
     JSON.stringify(identity.expectedShards), body.allowEmpty === true ? 1 : 0, deadline,
   ).run();
   const existing = await env.DB.prepare(`
     SELECT id, expected_shards_json, run_key, commit_sha, branch, merge_base_sha,
-      observed_default_head_sha, pull_request_number, trust_class, allow_empty, state, deadline_at
+      observed_default_head_sha, pull_request_number, pull_request_head_sha, trust_class, allow_empty, state, deadline_at
       FROM runs
      WHERE organization_id = ? AND project_id = ? AND provider = ? AND provider_run_id = ? AND attempt_number = ?
   `).bind(principal.organizationId, projectId, identity.provider, identity.providerRunId, identity.attemptNumber)
     .first<{
       id: string; expected_shards_json: string; run_key: string; commit_sha: string; branch: string;
       merge_base_sha: string | null; observed_default_head_sha: string | null; pull_request_number: number | null;
+      pull_request_head_sha: string | null;
       trust_class: string; allow_empty: number; state: string; deadline_at: number;
     }>();
   if (!existing) throw new Error("Run registration could not be persisted");
@@ -78,6 +80,7 @@ export async function registerRun(
       && existing.branch === identity.branch && existing.merge_base_sha === (identity.mergeBaseSha ?? null)
       && existing.observed_default_head_sha === (identity.observedDefaultHeadSha ?? null)
       && existing.pull_request_number === (identity.pullRequestNumber ?? null)
+      && existing.pull_request_head_sha === (identity.pullRequestHeadSha ?? null)
       && existing.trust_class === identity.trustClass && existing.allow_empty === (body.allowEmpty === true ? 1 : 0);
   if (!matches) throw new HttpError(409, "run_identity_conflict", "Run attempt already exists with different immutable metadata");
   const proposedShardId = randomId("shd");
@@ -91,7 +94,8 @@ export async function registerRun(
   if (!shard) throw new HttpError(409, "run_closed", "Run attempt is no longer open");
   if (identity.pullRequestNumber !== undefined) {
     await ensureInProgressGitHubCheck(env, principal.organizationId, projectId, runId,
-      identity.pullRequestNumber, identity.attemptNumber);
+      identity.pullRequestNumber, identity.pullRequestHeadSha ?? identity.commitSha,
+      identity.providerRunId, identity.attemptNumber);
   }
   return json({ run: { id: runId, state: existing.state }, shard: { id: shard.id, key: shard.shard_key, state: shard.state } },
     { status: Number(inserted.meta?.["changes"] ?? 0) === 1 ? 201 : 200 });
@@ -372,28 +376,64 @@ function validateIdentity(value: RunIdentity | undefined): RunIdentity {
     throw new HttpError(400, "invalid_run_identity", "Commit parent SHAs are invalid");
   }
   if (typeof value.graphComplete !== "boolean") throw new HttpError(400, "invalid_run_identity", "graphComplete must be a boolean");
-  return { ...value, expectedShards: [...shards].sort(), parentShas: [...new Set(value.parentShas)].sort() };
+  if (value.pullRequestHeadSha !== undefined && !isCommitSha(value.pullRequestHeadSha)) {
+    throw new HttpError(400, "invalid_run_identity", "Pull request head SHA is invalid");
+  }
+  if (!Array.isArray(value.commitGraph) || value.commitGraph.length > 512) {
+    throw new HttpError(400, "invalid_run_identity", "Commit graph must contain at most 512 observations");
+  }
+  const commitGraph = value.commitGraph.map((node, index) => {
+    if (!node || !isCommitSha(node.sha) || !Array.isArray(node.parentShas) || node.parentShas.length > 64
+      || node.parentShas.some((sha) => !isCommitSha(sha)) || typeof node.complete !== "boolean") {
+      throw new HttpError(400, "invalid_run_identity", `Commit graph observation ${index} is invalid`);
+    }
+    return { sha: node.sha, parentShas: [...new Set(node.parentShas)].sort(), complete: node.complete };
+  });
+  return { ...value, expectedShards: [...shards].sort(), parentShas: [...new Set(value.parentShas)].sort(), commitGraph };
+}
+
+function enforceRunConstraints(principal: MachinePrincipal, identity: RunIdentity): void {
+  const constraints = principal.runConstraints;
+  if (!constraints) return;
+  const matches = identity.provider === "github_actions"
+    && identity.providerRunId === constraints.providerRunId
+    && identity.attemptNumber === constraints.attemptNumber
+    && identity.commitSha === constraints.commitSha
+    && identity.branch === constraints.branch
+    && identity.pullRequestNumber === constraints.pullRequestNumber
+    && identity.pullRequestHeadSha === constraints.pullRequestHeadSha
+    && identity.trustClass === principal.trustClass;
+  if (!matches) throw new HttpError(403, "workflow_identity_mismatch", "Run identity does not match the verified GitHub workflow");
 }
 
 async function persistCommitGraph(env: Env, organizationId: string, projectId: string, identity: RunIdentity): Promise<void> {
-  const statements: D1PreparedStatement[] = [
-    env.DB.prepare("INSERT INTO commits (organization_id, project_id, sha, parents_complete) VALUES (?, ?, ?, 0) ON CONFLICT DO NOTHING")
-      .bind(organizationId, projectId, identity.commitSha),
-  ];
-  for (const parent of identity.parentShas) {
+  const observations = new Map(identity.commitGraph.map((node) => [node.sha, node]));
+  observations.set(identity.commitSha, {
+    sha: identity.commitSha,
+    parentShas: identity.parentShas,
+    complete: identity.graphComplete,
+  });
+  const statements: D1PreparedStatement[] = [];
+  for (const observation of observations.values()) {
     statements.push(env.DB.prepare("INSERT INTO commits (organization_id, project_id, sha, parents_complete) VALUES (?, ?, ?, 0) ON CONFLICT DO NOTHING")
-      .bind(organizationId, projectId, parent));
-    statements.push(env.DB.prepare(`
-      INSERT INTO commit_edges (organization_id, project_id, child_sha, parent_sha) VALUES (?, ?, ?, ?)
-      ON CONFLICT DO NOTHING
-    `).bind(organizationId, projectId, identity.commitSha, parent));
-  }
-  if (identity.graphComplete) {
-    statements.push(env.DB.prepare("UPDATE commits SET parents_complete = 1 WHERE organization_id = ? AND project_id = ? AND sha = ?")
-      .bind(organizationId, projectId, identity.commitSha));
+      .bind(organizationId, projectId, observation.sha));
+    for (const parent of observation.parentShas) {
+      statements.push(env.DB.prepare("INSERT INTO commits (organization_id, project_id, sha, parents_complete) VALUES (?, ?, ?, 0) ON CONFLICT DO NOTHING")
+        .bind(organizationId, projectId, parent));
+      statements.push(env.DB.prepare(`
+        INSERT INTO commit_edges (organization_id, project_id, child_sha, parent_sha) VALUES (?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
+      `).bind(organizationId, projectId, observation.sha, parent));
+    }
+    if (observation.complete) {
+      statements.push(env.DB.prepare("UPDATE commits SET parents_complete = 1 WHERE organization_id = ? AND project_id = ? AND sha = ?")
+        .bind(organizationId, projectId, observation.sha));
+    }
   }
   try {
-    await env.DB.batch(statements);
+    for (let offset = 0; offset < statements.length; offset += 100) {
+      await env.DB.batch(statements.slice(offset, offset + 100));
+    }
   } catch (error) {
     if (String(error).includes("commit_graph_immutable")) throw new HttpError(409, "commit_graph_conflict", "Commit parent graph conflicts with an earlier complete observation");
     throw error;

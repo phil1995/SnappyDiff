@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc, time::Duration};
+use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -64,6 +64,8 @@ struct UploadArgs {
     default_head: Option<String>,
     #[arg(long)]
     pull_request: Option<u64>,
+    #[arg(long)]
+    pull_request_head: Option<String>,
     #[arg(long = "parent")]
     parents: Vec<String>,
     #[arg(long)]
@@ -87,7 +89,18 @@ struct FileConfig {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OidcExchange { token: String, trust_class: String }
+struct OidcExchange { token: String, trust_class: String, run_constraints: OidcRunConstraints }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OidcRunConstraints {
+    provider_run_id: String,
+    attempt_number: u32,
+    commit_sha: String,
+    branch: String,
+    pull_request_number: Option<u64>,
+    pull_request_head_sha: Option<String>,
+}
 
 #[derive(Clone)]
 struct Api {
@@ -120,11 +133,17 @@ struct RunIdentity {
     merge_base_sha: Option<String>,
     observed_default_head_sha: Option<String>,
     pull_request_number: Option<u64>,
+    pull_request_head_sha: Option<String>,
     expected_shards: Vec<String>,
     trust_class: &'static str,
     parent_shas: Vec<String>,
     graph_complete: bool,
+    commit_graph: Vec<CommitObservation>,
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitObservation { sha: String, parent_shas: Vec<String>, complete: bool }
 
 #[derive(Deserialize)]
 struct RegisterResponse { run: ResourceId, shard: ResourceId }
@@ -179,6 +198,12 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 let exchange = github_oidc_token(&client, &endpoint, project, args.pull_request, file_config.oidc_audience.as_deref()).await?;
                 args.fork = exchange.trust_class == "fork_isolated";
+                args.provider_run_id = Some(exchange.run_constraints.provider_run_id);
+                args.attempt = exchange.run_constraints.attempt_number;
+                args.commit = exchange.run_constraints.commit_sha;
+                args.branch = exchange.run_constraints.branch;
+                args.pull_request = exchange.run_constraints.pull_request_number;
+                args.pull_request_head = exchange.run_constraints.pull_request_head_sha;
                 exchange.token
             };
             if !token.starts_with("sd_") { bail!("machine credential has an invalid format"); }
@@ -226,18 +251,29 @@ async fn upload(api: &Api, args: UploadArgs, json_output: bool) -> Result<()> {
     if entries.is_empty() && !args.allow_empty { bail!("no PNG screenshots found; pass --allow-empty only for an intentional full removal"); }
     let provider_run_id = args.provider_run_id.unwrap_or_else(|| format!("manual-{}", epoch_millis()));
     let expected_shards = if args.expected_shards.is_empty() { vec![args.shard.clone()] } else { args.expected_shards.clone() };
+    deepen_shallow_checkout(&args.directory)?;
+    let default_head = args.default_head.or_else(|| discover_base_head(&args.directory));
+    let merge_base = match args.merge_base {
+        Some(value) => Some(value),
+        None => default_head.as_deref().and_then(|base| git_value(&args.directory, &["merge-base", &args.commit, base])),
+    };
+    if args.pull_request.is_some() && merge_base.is_none() {
+        bail!("pull request merge base is unavailable; fetch the base branch history or pass --merge-base");
+    }
     let explicit_parents = !args.parents.is_empty();
     let discovered_parents = if explicit_parents { None } else { git_parents(&args.directory, &args.commit) };
     let parent_shas = discovered_parents.clone().unwrap_or(args.parents);
-    let graph_complete = !args.graph_incomplete && (explicit_parents || discovered_parents.is_some());
+    let graph_complete = !args.graph_incomplete && (explicit_parents || discovered_parents.is_some())
+        && !shallow_commits(&args.directory).contains(&args.commit);
+    let commit_graph = git_graph(&args.directory, &args.commit, merge_base.as_deref())?;
     let identity = RunIdentity {
         provider: if std::env::var_os("GITHUB_ACTIONS").is_some() { "github_actions" } else { "manual" },
         run_key: args.run_key.unwrap_or_else(|| provider_run_id.clone()), provider_run_id,
         attempt_number: args.attempt, commit_sha: args.commit, branch: args.branch,
-        merge_base_sha: args.merge_base, observed_default_head_sha: args.default_head,
-        pull_request_number: args.pull_request, expected_shards,
+        merge_base_sha: merge_base, observed_default_head_sha: default_head,
+        pull_request_number: args.pull_request, pull_request_head_sha: args.pull_request_head, expected_shards,
         trust_class: if args.fork { "fork_isolated" } else { "first_party" },
-        parent_shas, graph_complete,
+        parent_shas, graph_complete, commit_graph,
     };
     let registration: RegisterResponse = api.post(&format!("/api/v1/projects/{project}/runs"), &serde_json::json!({
         "identity": identity, "shardId": args.shard, "allowEmpty": args.allow_empty,
@@ -404,6 +440,57 @@ fn load_config(path: &Path) -> Result<FileConfig> {
     if !path.exists() { return Ok(FileConfig::default()); }
     let contents = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     serde_json::from_str(&contents).with_context(|| format!("invalid configuration in {}", path.display()))
+}
+
+fn git_value(directory: &Path, arguments: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").args(arguments).current_dir(directory).output().ok()?;
+    if !output.status.success() { return None; }
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+fn deepen_shallow_checkout(directory: &Path) -> Result<()> {
+    if git_value(directory, &["rev-parse", "--is-shallow-repository"]).as_deref() != Some("true") { return Ok(()); }
+    let status = std::process::Command::new("git")
+        .args(["fetch", "--deepen=512", "--no-tags", "origin"])
+        .current_dir(directory)
+        .status()
+        .context("failed to fetch shallow Git history")?;
+    if !status.success() { bail!("shallow Git history could not be deepened; configure checkout fetch-depth or provide full history"); }
+    Ok(())
+}
+
+fn discover_base_head(directory: &Path) -> Option<String> {
+    let base = std::env::var("GITHUB_BASE_REF").ok().filter(|value| !value.is_empty())?;
+    git_value(directory, &["rev-parse", &format!("origin/{base}")])
+}
+
+fn shallow_commits(directory: &Path) -> HashSet<String> {
+    let Some(path) = git_value(directory, &["rev-parse", "--git-path", "shallow"]) else { return HashSet::new(); };
+    let path = PathBuf::from(path);
+    let resolved = if path.is_absolute() { path } else { directory.join(path) };
+    std::fs::read_to_string(resolved).unwrap_or_default().lines().map(ToOwned::to_owned).collect()
+}
+
+fn git_graph(directory: &Path, commit: &str, merge_base: Option<&str>) -> Result<Vec<CommitObservation>> {
+    let mut command = std::process::Command::new("git");
+    command.args(["rev-list", "--parents", "--max-count=512", commit]);
+    if let Some(base) = merge_base { command.arg(base); }
+    let output = command.current_dir(directory).output().context("failed to inspect Git history")?;
+    if !output.status.success() { return Ok(Vec::new()); }
+    let shallow = shallow_commits(directory);
+    let stdout = String::from_utf8(output.stdout).context("Git history was not UTF-8")?;
+    let mut observations = Vec::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(sha) = parts.next() else { continue; };
+        observations.push(CommitObservation {
+            sha: sha.to_owned(),
+            parent_shas: parts.map(ToOwned::to_owned).collect(),
+            complete: !shallow.contains(sha),
+        });
+    }
+    Ok(observations)
 }
 
 fn git_parents(directory: &Path, commit: &str) -> Option<Vec<String>> {
