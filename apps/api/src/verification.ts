@@ -81,8 +81,13 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
       WHERE organization_id = ? AND sha256 = ? AND image_id = ? AND r2_key = ? AND deletion_owner IS NULL`)
       .bind(upload.organization_id, actualHash, publication.image_id, publication.r2_key).first();
     if (!stillOwned) {
-      await env.IMAGES.delete(publication.r2_key);
-      throw new Error("Image publication was retired while uploading; verification will retry");
+      const activated = await env.DB.prepare(`SELECT 1 AS found FROM images
+        WHERE organization_id = ? AND sha256 = ? AND r2_key = ? AND reference_state = 'active'`)
+        .bind(upload.organization_id, actualHash, publication.r2_key).first();
+      if (!activated) {
+        await env.IMAGES.delete(publication.r2_key);
+        throw new Error("Image publication was retired while uploading; verification will retry");
+      }
     }
   }
   await env.DB.batch([
@@ -90,7 +95,8 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
       UPDATE organization_usage SET
         stored_bytes = stored_bytes + CASE WHEN NOT EXISTS (
           SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ?
-        ) AND EXISTS (SELECT 1 FROM image_publications WHERE organization_id = ? AND sha256 = ?)
+        ) AND EXISTS (SELECT 1 FROM image_publications
+          WHERE organization_id = ? AND sha256 = ? AND deletion_owner IS NULL)
         THEN ? ELSE 0 END, updated_at = unixepoch()
        WHERE organization_id = ? AND EXISTS (
          SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?

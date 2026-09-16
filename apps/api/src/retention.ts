@@ -147,11 +147,8 @@ async function collectAbandonedPublications(env: Env): Promise<void> {
   for (const publication of publications.results ?? []) {
     await env.IMAGES.delete(publication.r2_key);
     await env.DB.prepare(`DELETE FROM image_publications WHERE organization_id = ? AND sha256 = ?
-      AND image_id = ? AND r2_key = ? AND deletion_owner = ? AND NOT EXISTS (
-        SELECT 1 FROM upload_sessions u WHERE u.organization_id = ? AND u.expected_sha256 = ?
-          AND u.state IN ('pending', 'uploaded', 'verifying') AND u.expires_at >= unixepoch()
-      )`).bind(publication.organization_id, publication.sha256, publication.image_id, publication.r2_key,
-      owner, publication.organization_id, publication.sha256).run();
+      AND image_id = ? AND r2_key = ? AND deletion_owner = ?`)
+      .bind(publication.organization_id, publication.sha256, publication.image_id, publication.r2_key, owner).run();
   }
 }
 
