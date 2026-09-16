@@ -25,7 +25,9 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
   }>();
   if (!upload || upload.state === "failed" || upload.state === "expired") return;
   if (upload.object_version !== payload.objectVersion) return;
-  if (await organizationDeletionPending(env, upload.organization_id)) return;
+  if (await organizationDeletionState(env, upload.organization_id)) {
+    throw new Error("Organization deletion is pending; verification is deferred");
+  }
   if (upload.state === "published") {
     await ensureCanonicalObject(env, upload, payload.objectVersion);
     await ensureShardCompletionOutbox(env, upload);
@@ -79,8 +81,9 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
       httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: actualHash },
       onlyIf: { etagDoesNotMatch: "*" },
     });
-    if (await organizationDeletionPending(env, upload.organization_id)) {
-      await env.IMAGES.delete(publication.r2_key);
+    const deletionState = await organizationDeletionState(env, upload.organization_id);
+    if (deletionState) {
+      if (deletionState === "deleting") await env.IMAGES.delete(publication.r2_key);
       throw new Error("Organization deletion began during image publication");
     }
     const stillOwned = await env.DB.prepare(`SELECT 1 AS found FROM image_publications
@@ -88,8 +91,9 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
         AND NOT EXISTS (SELECT 1 FROM organization_deletion_requests WHERE organization_id = ?)`)
       .bind(upload.organization_id, actualHash, publication.image_id, publication.r2_key, upload.organization_id).first();
     if (!stillOwned) {
-      if (await organizationDeletionPending(env, upload.organization_id)) {
-        await env.IMAGES.delete(publication.r2_key);
+      const deletionState = await organizationDeletionState(env, upload.organization_id);
+      if (deletionState) {
+        if (deletionState === "deleting") await env.IMAGES.delete(publication.r2_key);
         throw new Error("Organization deletion began during image publication");
       }
       const activated = await env.DB.prepare(`SELECT 1 AS found FROM images
@@ -193,16 +197,18 @@ async function ensureCanonicalObject(
     httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: upload.expected_sha256 },
     onlyIf: { etagDoesNotMatch: "*" },
   });
-  if (await organizationDeletionPending(env, upload.organization_id)) {
-    await env.IMAGES.delete(image.r2_key);
+  const deletionState = await organizationDeletionState(env, upload.organization_id);
+  if (deletionState) {
+    if (deletionState === "deleting") await env.IMAGES.delete(image.r2_key);
     throw new Error("Organization deletion began while restoring a canonical image");
   }
   return image.r2_key;
 }
 
-async function organizationDeletionPending(env: Env, organizationId: string): Promise<boolean> {
-  return Boolean(await env.DB.prepare(`SELECT 1 AS found FROM organization_deletion_requests
-    WHERE organization_id = ?`).bind(organizationId).first());
+async function organizationDeletionState(env: Env, organizationId: string): Promise<"pending" | "deleting" | null> {
+  const deletion = await env.DB.prepare(`SELECT state FROM organization_deletion_requests
+    WHERE organization_id = ?`).bind(organizationId).first<{ state: "pending" | "deleting" }>();
+  return deletion?.state ?? null;
 }
 
 function completionJobStatement(

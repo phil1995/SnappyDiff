@@ -66,12 +66,32 @@ export async function drainJobs(env: Env, maximum = 25): Promise<number> {
     const job = await env.DB.prepare("SELECT id, organization_id, kind, payload_json, attempts, max_attempts FROM jobs WHERE id = ? AND lease_owner = ?")
       .bind(id, leaseOwner).first<PendingJob>();
     if (!job) continue;
+    if (job.organization_id) {
+      if (await hasDeletionRequest(env, job.organization_id)) {
+        await env.DB.prepare(`UPDATE jobs SET status = 'pending', next_attempt_at = unixepoch() + 60,
+          lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch()
+          WHERE id = ? AND lease_owner = ?`).bind(id, leaseOwner).run();
+        continue;
+      }
+    }
     try {
       await executeJob(env, job);
+      if (job.organization_id && await hasDeletionRequest(env, job.organization_id)) {
+        await env.DB.prepare(`UPDATE jobs SET status = 'pending', next_attempt_at = unixepoch() + 60,
+          lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch()
+          WHERE id = ? AND lease_owner = ?`).bind(id, leaseOwner).run();
+        continue;
+      }
       await env.DB.prepare("UPDATE jobs SET status = 'completed', lease_owner = NULL, lease_expires_at = NULL, completed_at = unixepoch(), updated_at = unixepoch() WHERE id = ? AND lease_owner = ?")
         .bind(id, leaseOwner).run();
       completed++;
     } catch (error) {
+      if (job.organization_id && await hasDeletionRequest(env, job.organization_id)) {
+        await env.DB.prepare(`UPDATE jobs SET status = 'pending', next_attempt_at = unixepoch() + 60,
+          lease_owner = NULL, lease_expires_at = NULL, updated_at = unixepoch()
+          WHERE id = ? AND lease_owner = ?`).bind(id, leaseOwner).run();
+        continue;
+      }
       const attempts = job.attempts + 1;
       const exhausted = attempts >= job.max_attempts;
       const delay = Math.min(3600, 2 ** Math.min(attempts, 10));
@@ -85,12 +105,12 @@ export async function drainJobs(env: Env, maximum = 25): Promise<number> {
   return completed;
 }
 
+async function hasDeletionRequest(env: Env, organizationId: string): Promise<boolean> {
+  return Boolean(await env.DB.prepare(`SELECT 1 AS found FROM organization_deletion_requests
+    WHERE organization_id = ?`).bind(organizationId).first());
+}
+
 async function executeJob(env: Env, job: PendingJob): Promise<void> {
-  if (job.organization_id) {
-    const deletion = await env.DB.prepare(`SELECT 1 AS found FROM organization_deletion_requests
-      WHERE organization_id = ?`).bind(job.organization_id).first();
-    if (deletion) return;
-  }
   if (job.kind === "verify_upload") return verifyUploadJob(env, job);
   if (job.kind === "complete_run") return completeRunJob(env, job);
   if (job.kind === "select_baseline") return processBaselineJob(env, job);
