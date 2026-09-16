@@ -18,7 +18,8 @@ const REPOSITORY_PART = /^[A-Za-z0-9_.-]{1,100}$/;
 export async function listProjects(env: Env, session: Session): Promise<Response> {
   requirePermission(session, "runs:view");
   const result = await env.DB.prepare(`
-    SELECT id, name, slug, repository_owner, repository_name, default_branch, created_at
+    SELECT id, name, slug, repository_owner AS repositoryOwner, repository_name AS repositoryName,
+      default_branch AS defaultBranch, created_at AS createdAt
       FROM projects WHERE organization_id = ? AND deleted_at IS NULL ORDER BY name
   `).bind(session.organizationId).all();
   return json({ projects: result.results ?? [] });
@@ -27,8 +28,9 @@ export async function listProjects(env: Env, session: Session): Promise<Response
 export async function getProject(env: Env, session: Session, projectId: string): Promise<Response> {
   requirePermission(session, "runs:view");
   const project = await env.DB.prepare(`
-    SELECT id, name, slug, repository_owner, repository_name, default_branch, retention_days,
-      promoted_retention_days, created_at, updated_at
+    SELECT id, name, slug, repository_owner AS repositoryOwner, repository_name AS repositoryName,
+      default_branch AS defaultBranch, retention_days AS retentionDays,
+      promoted_retention_days AS promotedRetentionDays, created_at AS createdAt, updated_at AS updatedAt
       FROM projects WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
   `).bind(session.organizationId, projectId).first();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");

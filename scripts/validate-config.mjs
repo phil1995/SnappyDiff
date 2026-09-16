@@ -11,6 +11,7 @@ const requiredVariables = [
 
 const requiredSecrets = [
   "WORKOS_API_KEY",
+  "WORKOS_WEBHOOK_SECRET",
   "WORKOS_COOKIE_PASSWORD",
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_WEBHOOK_SECRET",

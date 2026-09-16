@@ -4,6 +4,8 @@
 
 Organization creation is an operator-controlled action in the initial release. After creating the organization in WorkOS, insert the SnappyDiff organization and usage row in one D1 batch, then let the administrator attempt one login so the `users` row is created. Add the matching `(organization_id, user_id)` membership with role `admin`. Do not create memberships from email addresses alone; use the verified WorkOS user identifier recorded by the callback.
 
+WorkOS membership webhooks must target `/webhooks/workos`. Signed membership deletion and update events synchronize local access, while application sessions expire after 15 minutes as a bounded fallback. Provider delivery failures are an alert condition.
+
 The local-only `apps/api/scripts/seed-local.sql` creates a development organization and quota. It is outside the migrations directory so it cannot be applied during a remote migration by accident.
 
 ## Scheduled work
@@ -25,4 +27,3 @@ Migrations are forward-only. Apply migrations to staging, exercise the prior and
 - Job lease uncertainty: wait for lease expiry; never manually run the same effect concurrently.
 - R2 publication uncertainty: re-verify the exact temporary object version before publishing.
 - Tenant-boundary concern: disable the affected route or token class and retain audit data.
-

@@ -4,7 +4,7 @@ import type { Env } from "./platform.ts";
 
 const SESSION_COOKIE = "snappydiff_session";
 const OAUTH_STATE_COOKIE = "snappydiff_oauth_state";
-const SESSION_SECONDS = 8 * 60 * 60;
+const SESSION_SECONDS = 15 * 60;
 
 export type HumanRole = "viewer" | "reviewer" | "admin";
 
@@ -52,7 +52,7 @@ function sessionSecret(env: Env): string {
 export async function beginLogin(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const requestedReturn = url.searchParams.get("return_to") ?? "/";
-  const returnTo = requestedReturn.startsWith("/") && !requestedReturn.startsWith("//") ? requestedReturn : "/";
+  const returnTo = safeReturnPath(requestedReturn, env.APP_ORIGIN);
   const state: OAuthState = { nonce: randomId("state"), returnTo, exp: Math.floor(Date.now() / 1000) + 600 };
   const encodedState = await signJson(state, sessionSecret(env));
   const authorize = new URL("https://api.workos.com/user_management/authorize");
@@ -85,8 +85,8 @@ export async function finishLogin(request: Request, env: Env): Promise<Response>
 
   const providerResponse = await fetch("https://api.workos.com/user_management/authenticate", {
     method: "POST",
-    headers: { authorization: `Bearer ${env.WORKOS_API_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ client_id: env.WORKOS_CLIENT_ID, code, grant_type: "authorization_code" }),
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ client_id: env.WORKOS_CLIENT_ID, client_secret: env.WORKOS_API_KEY, code, grant_type: "authorization_code" }),
   });
   if (!providerResponse.ok) throw new HttpError(401, "authentication_failed", "Authentication provider rejected the callback");
   const authentication = (await providerResponse.json()) as WorkOSAuthentication;
@@ -100,6 +100,18 @@ export async function finishLogin(request: Request, env: Env): Promise<Response>
     status: 302,
     headers,
   });
+}
+
+export function safeReturnPath(value: string, origin: string): string {
+  try {
+    if (value.includes("\\")) return "/";
+    const base = new URL(origin);
+    const resolved = new URL(value, base);
+    if (resolved.origin !== base.origin || !value.startsWith("/") || value.startsWith("//")) return "/";
+    return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  } catch {
+    return "/";
+  }
 }
 
 async function provisionSession(env: Env, authentication: WorkOSAuthentication): Promise<Session> {

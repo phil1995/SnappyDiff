@@ -1,10 +1,11 @@
 import { beginLogin, finishLogin, logout, requireSession } from "./auth.ts";
 import { randomId, sha256 } from "./crypto.ts";
 import { errorResponse, HttpError, json, withRequestId, type RequestContext } from "./http.ts";
-import { drainJobs, enqueueJob } from "./jobs.ts";
+import { drainJobs, enqueueSystemJob } from "./jobs.ts";
 import type { Env, ExecutionContext, ScheduledController } from "./platform.ts";
 import { createProject, getProject, listProjects } from "./projects.ts";
 import { enforceRateLimit } from "./rate-limit.ts";
+import { handleWorkOSWebhook } from "./workos-webhook.ts";
 
 const API_PREFIX = "/api/v1";
 
@@ -20,6 +21,11 @@ async function handle(request: Request, env: Env, context: RequestContext): Prom
   }
   if (url.pathname === "/auth/callback" && request.method === "GET") return finishLogin(request, env);
   if (url.pathname === "/auth/logout" && request.method === "POST") return logout(env);
+  if (url.pathname === "/webhooks/workos" && request.method === "POST") {
+    const ipKey = await requestRateKey(request, "workos-webhook");
+    await enforceRateLimit(env, ipKey, 120, 60);
+    return handleWorkOSWebhook(request, env, context.requestId);
+  }
 
   if (url.pathname.startsWith(API_PREFIX)) {
     const session = await requireSession(request, env);
@@ -76,11 +82,8 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, execution: ExecutionContext): Promise<void> {
-    const organizations = await env.DB.prepare("SELECT id FROM organizations WHERE deletion_requested_at IS NULL").all<{ id: string }>();
-    for (const organization of organizations.results ?? []) {
-      await enqueueJob(env, organization.id, "reconcile", `reconcile:${Math.floor(Date.now() / 300000)}`, {});
-      await enqueueJob(env, organization.id, "cleanup", `cleanup:${Math.floor(Date.now() / 3600000)}`, {});
-    }
+    await enqueueSystemJob(env, "reconcile", `system:reconcile:${Math.floor(Date.now() / 300000)}`);
+    await enqueueSystemJob(env, "cleanup", `system:cleanup:${Math.floor(Date.now() / 3600000)}`);
     execution.waitUntil(drainJobs(env, 50));
   },
 };

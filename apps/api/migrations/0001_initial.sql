@@ -51,6 +51,7 @@ CREATE TABLE projects (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   deleted_at INTEGER,
+  UNIQUE (id, organization_id),
   UNIQUE (organization_id, slug),
   UNIQUE (organization_id, repository_owner, repository_name)
 ) STRICT;
@@ -59,7 +60,7 @@ CREATE INDEX projects_tenant_active ON projects(organization_id, created_at) WHE
 CREATE TABLE suites (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL,
   name TEXT NOT NULL CHECK (name = 'default'),
   is_system_default INTEGER NOT NULL DEFAULT 1 CHECK (is_system_default = 1),
   baseline_version INTEGER NOT NULL DEFAULT 0 CHECK (baseline_version >= 0),
@@ -69,17 +70,20 @@ CREATE TABLE suites (
   known_default_head_sha TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE (organization_id, project_id, name)
+  UNIQUE (id, organization_id),
+  UNIQUE (organization_id, project_id, name),
+  FOREIGN KEY (project_id, organization_id) REFERENCES projects(id, organization_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX suites_tenant_project ON suites(organization_id, project_id);
 
 CREATE TABLE commits (
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL,
   sha TEXT NOT NULL CHECK (length(sha) BETWEEN 7 AND 64),
   committed_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  PRIMARY KEY (organization_id, project_id, sha)
+  PRIMARY KEY (organization_id, project_id, sha),
+  FOREIGN KEY (project_id, organization_id) REFERENCES projects(id, organization_id) ON DELETE CASCADE
 ) WITHOUT ROWID, STRICT;
 
 CREATE TABLE commit_edges (
@@ -97,8 +101,8 @@ CREATE INDEX commit_edges_tenant_parent ON commit_edges(organization_id, project
 CREATE TABLE runs (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  suite_id TEXT NOT NULL REFERENCES suites(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL,
+  suite_id TEXT NOT NULL,
   provider TEXT NOT NULL CHECK (provider IN ('github_actions', 'manual', 'other')),
   provider_run_id TEXT NOT NULL,
   attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
@@ -118,7 +122,10 @@ CREATE TABLE runs (
   completed_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE (organization_id, project_id, provider, provider_run_id, attempt_number)
+  UNIQUE (id, organization_id),
+  UNIQUE (organization_id, project_id, provider, provider_run_id, attempt_number),
+  FOREIGN KEY (project_id, organization_id) REFERENCES projects(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (suite_id, organization_id) REFERENCES suites(id, organization_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX runs_tenant_project_created ON runs(organization_id, project_id, created_at DESC);
 CREATE INDEX runs_tenant_state_deadline ON runs(organization_id, state, deadline_at);
@@ -126,7 +133,7 @@ CREATE INDEX runs_tenant_state_deadline ON runs(organization_id, state, deadline
 CREATE TABLE run_shards (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
   shard_key TEXT NOT NULL,
   manifest_digest TEXT,
   expected_pages INTEGER,
@@ -137,7 +144,9 @@ CREATE TABLE run_shards (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   UNIQUE (organization_id, run_id, shard_key),
-  UNIQUE (organization_id, run_id, idempotency_key)
+  UNIQUE (id, organization_id),
+  UNIQUE (organization_id, run_id, idempotency_key),
+  FOREIGN KEY (run_id, organization_id) REFERENCES runs(id, organization_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX run_shards_tenant_run ON run_shards(organization_id, run_id);
 
@@ -153,6 +162,7 @@ CREATE TABLE images (
   reference_state TEXT NOT NULL DEFAULT 'active' CHECK (reference_state IN ('active', 'deleting')),
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   deleted_at INTEGER,
+  UNIQUE (id, organization_id),
   UNIQUE (organization_id, sha256)
 ) STRICT;
 CREATE INDEX images_tenant_state ON images(organization_id, reference_state);
@@ -160,9 +170,9 @@ CREATE INDEX images_tenant_state ON images(organization_id, reference_state);
 CREATE TABLE upload_sessions (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  shard_id TEXT NOT NULL REFERENCES run_shards(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  shard_id TEXT NOT NULL,
   expected_sha256 TEXT NOT NULL CHECK (length(expected_sha256) = 64),
   expected_bytes INTEGER NOT NULL CHECK (expected_bytes BETWEEN 1 AND 33554432),
   temporary_key TEXT NOT NULL UNIQUE,
@@ -172,29 +182,35 @@ CREATE TABLE upload_sessions (
   expires_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE (organization_id, run_id, shard_id, expected_sha256)
+  UNIQUE (organization_id, run_id, shard_id, expected_sha256),
+  FOREIGN KEY (project_id, organization_id) REFERENCES projects(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (run_id, organization_id) REFERENCES runs(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (shard_id, organization_id) REFERENCES run_shards(id, organization_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX upload_sessions_tenant_expiry ON upload_sessions(organization_id, state, expires_at);
 
 CREATE TABLE screenshots (
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  shard_id TEXT NOT NULL REFERENCES run_shards(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  shard_id TEXT NOT NULL,
   name TEXT NOT NULL,
-  image_id TEXT NOT NULL REFERENCES images(id),
+  image_id TEXT NOT NULL,
   metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  PRIMARY KEY (organization_id, run_id, name)
+  PRIMARY KEY (organization_id, run_id, name),
+  FOREIGN KEY (run_id, organization_id) REFERENCES runs(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (shard_id, organization_id) REFERENCES run_shards(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (image_id, organization_id) REFERENCES images(id, organization_id)
 ) WITHOUT ROWID, STRICT;
 CREATE INDEX screenshots_tenant_image ON screenshots(organization_id, image_id);
 
 CREATE TABLE comparisons (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  suite_id TEXT NOT NULL REFERENCES suites(id) ON DELETE CASCADE,
-  baseline_run_id TEXT REFERENCES runs(id),
-  current_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL,
+  suite_id TEXT NOT NULL,
+  baseline_run_id TEXT,
+  current_run_id TEXT NOT NULL,
   added_count INTEGER NOT NULL DEFAULT 0 CHECK (added_count >= 0),
   removed_count INTEGER NOT NULL DEFAULT 0 CHECK (removed_count >= 0),
   changed_count INTEGER NOT NULL DEFAULT 0 CHECK (changed_count >= 0),
@@ -205,31 +221,41 @@ CREATE TABLE comparisons (
   reviewed_by_user_id TEXT REFERENCES users(id),
   reviewed_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE (organization_id, current_run_id)
+  UNIQUE (id, organization_id),
+  UNIQUE (organization_id, current_run_id),
+  FOREIGN KEY (project_id, organization_id) REFERENCES projects(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (suite_id, organization_id) REFERENCES suites(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (baseline_run_id, organization_id) REFERENCES runs(id, organization_id),
+  FOREIGN KEY (current_run_id, organization_id) REFERENCES runs(id, organization_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX comparisons_tenant_project ON comparisons(organization_id, project_id, created_at DESC);
 
 CREATE TABLE baselines (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  suite_id TEXT NOT NULL REFERENCES suites(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES runs(id),
+  suite_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
   segment INTEGER NOT NULL DEFAULT 1,
   action TEXT NOT NULL CHECK (action IN ('seed', 'promote', 'rollback', 'resume', 'history_reset')),
   actor_user_id TEXT REFERENCES users(id),
-  previous_run_id TEXT REFERENCES runs(id),
+  previous_run_id TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE (organization_id, suite_id, run_id, action, segment)
+  UNIQUE (organization_id, suite_id, run_id, action, segment),
+  FOREIGN KEY (suite_id, organization_id) REFERENCES suites(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (run_id, organization_id) REFERENCES runs(id, organization_id),
+  FOREIGN KEY (previous_run_id, organization_id) REFERENCES runs(id, organization_id)
 ) STRICT;
 CREATE INDEX baselines_tenant_suite ON baselines(organization_id, suite_id, created_at DESC);
 
 CREATE TABLE commit_runs (
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  suite_id TEXT NOT NULL REFERENCES suites(id) ON DELETE CASCADE,
+  suite_id TEXT NOT NULL,
   commit_sha TEXT NOT NULL,
-  run_id TEXT NOT NULL REFERENCES runs(id),
+  run_id TEXT NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  PRIMARY KEY (organization_id, suite_id, commit_sha)
+  PRIMARY KEY (organization_id, suite_id, commit_sha),
+  FOREIGN KEY (suite_id, organization_id) REFERENCES suites(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (run_id, organization_id) REFERENCES runs(id, organization_id)
 ) WITHOUT ROWID, STRICT;
 
 CREATE TABLE retention_pins (
@@ -237,17 +263,19 @@ CREATE TABLE retention_pins (
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   owner_type TEXT NOT NULL CHECK (owner_type IN ('active_baseline', 'rollback', 'open_pull_request')),
   owner_id TEXT NOT NULL,
-  run_id TEXT REFERENCES runs(id),
-  comparison_id TEXT REFERENCES comparisons(id),
+  run_id TEXT,
+  comparison_id TEXT,
   released_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE (organization_id, owner_type, owner_id, run_id, comparison_id)
+  UNIQUE (organization_id, owner_type, owner_id, run_id, comparison_id),
+  FOREIGN KEY (run_id, organization_id) REFERENCES runs(id, organization_id),
+  FOREIGN KEY (comparison_id, organization_id) REFERENCES comparisons(id, organization_id)
 ) STRICT;
 CREATE INDEX retention_pins_tenant_active ON retention_pins(organization_id, run_id, comparison_id) WHERE released_at IS NULL;
 
 CREATE TABLE jobs (
   id TEXT PRIMARY KEY,
-  organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  organization_id TEXT REFERENCES organizations(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
   deduplication_key TEXT NOT NULL,
   payload_json TEXT NOT NULL,
@@ -261,15 +289,17 @@ CREATE TABLE jobs (
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   completed_at INTEGER,
-  UNIQUE (organization_id, deduplication_key)
+  UNIQUE (organization_id, deduplication_key),
+  CHECK ((organization_id IS NULL AND kind IN ('reconcile', 'cleanup')) OR organization_id IS NOT NULL)
 ) STRICT;
+CREATE UNIQUE INDEX jobs_system_deduplication ON jobs(deduplication_key) WHERE organization_id IS NULL;
 CREATE INDEX jobs_ready ON jobs(status, next_attempt_at, lease_expires_at);
 
 CREATE TABLE github_checks (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
   installation_id TEXT NOT NULL,
   github_check_id INTEGER,
   desired_version INTEGER NOT NULL DEFAULT 1,
@@ -278,7 +308,9 @@ CREATE TABLE github_checks (
   last_error TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE (organization_id, run_id)
+  UNIQUE (organization_id, run_id),
+  FOREIGN KEY (project_id, organization_id) REFERENCES projects(id, organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (run_id, organization_id) REFERENCES runs(id, organization_id) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE github_installations (
@@ -297,7 +329,7 @@ CREATE TABLE github_installations (
 CREATE TABLE api_tokens (
   id TEXT PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  project_id TEXT,
   name TEXT NOT NULL,
   token_prefix TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
@@ -306,7 +338,8 @@ CREATE TABLE api_tokens (
   last_used_at INTEGER,
   revoked_at INTEGER,
   created_by_user_id TEXT REFERENCES users(id),
-  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  FOREIGN KEY (project_id, organization_id) REFERENCES projects(id, organization_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX api_tokens_tenant_active ON api_tokens(organization_id, project_id, expires_at) WHERE revoked_at IS NULL;
 
@@ -331,4 +364,3 @@ CREATE TABLE rate_limits (
   expires_at INTEGER NOT NULL,
   PRIMARY KEY (key, window_start)
 ) WITHOUT ROWID, STRICT;
-

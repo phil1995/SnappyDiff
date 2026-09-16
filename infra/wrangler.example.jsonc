@@ -33,5 +33,47 @@
     "WORKOS_REDIRECT_URI": "http://localhost:8787/auth/callback",
     "GITHUB_APP_ID": "0",
     "GITHUB_APP_SLUG": "snappydiff-local"
+  },
+  "env": {
+    "staging": {
+      "name": "snappydiff-api-staging",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "snappydiff-staging",
+          "database_id": "replace-with-staging-database-id",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "snappydiff-staging-images" }],
+      "vars": {
+        "APP_ENV": "staging",
+        "APP_ORIGIN": "https://staging.example.invalid",
+        "WORKOS_CLIENT_ID": "replace-with-staging-client-id",
+        "WORKOS_REDIRECT_URI": "https://staging.example.invalid/auth/callback",
+        "GITHUB_APP_ID": "replace-with-staging-app-id",
+        "GITHUB_APP_SLUG": "replace-with-staging-app-slug"
+      }
+    },
+    "production": {
+      "name": "snappydiff-api-production",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "snappydiff-production",
+          "database_id": "replace-with-production-database-id",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "snappydiff-production-images" }],
+      "vars": {
+        "APP_ENV": "production",
+        "APP_ORIGIN": "https://app.example.invalid",
+        "WORKOS_CLIENT_ID": "replace-with-production-client-id",
+        "WORKOS_REDIRECT_URI": "https://app.example.invalid/auth/callback",
+        "GITHUB_APP_ID": "replace-with-production-app-id",
+        "GITHUB_APP_SLUG": "replace-with-production-app-slug"
+      }
+    }
   }
 }

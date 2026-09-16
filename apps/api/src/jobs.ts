@@ -5,11 +5,22 @@ export type JobKind = "verify_upload" | "complete_run" | "select_baseline" | "de
 
 export interface PendingJob {
   id: string;
-  organization_id: string;
+  organization_id: string | null;
   kind: JobKind;
   payload_json: string;
   attempts: number;
   max_attempts: number;
+}
+
+export async function enqueueSystemJob(
+  env: Env,
+  kind: "reconcile" | "cleanup",
+  deduplicationKey: string,
+): Promise<void> {
+  await env.DB.prepare(`
+    INSERT INTO jobs (id, organization_id, kind, deduplication_key, payload_json)
+    VALUES (?, NULL, ?, ?, '{}') ON CONFLICT DO NOTHING
+  `).bind(randomId("job"), kind, deduplicationKey).run();
 }
 
 export async function enqueueJob(
@@ -29,7 +40,6 @@ export async function enqueueJob(
 
 export async function drainJobs(env: Env, maximum = 25): Promise<number> {
   const leaseOwner = randomId("lease");
-  const leaseUntil = Math.floor(Date.now() / 1000) + 60;
   const candidates = await env.DB.prepare(`
     SELECT id FROM jobs
      WHERE status = 'pending' AND next_attempt_at <= unixepoch()
@@ -39,6 +49,7 @@ export async function drainJobs(env: Env, maximum = 25): Promise<number> {
   const ids = candidates.results?.map(({ id }) => id) ?? [];
   let completed = 0;
   for (const id of ids) {
+    const leaseUntil = Math.floor(Date.now() / 1000) + 300;
     const lease = await env.DB.prepare(`
       UPDATE jobs SET lease_owner = ?, lease_expires_at = ?, status = 'running', updated_at = unixepoch()
        WHERE id = ? AND status = 'pending' AND (lease_expires_at IS NULL OR lease_expires_at < unixepoch())
@@ -73,9 +84,23 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
     return;
   }
   if (job.kind === "cleanup") {
-    await env.DB.prepare("UPDATE upload_sessions SET state = 'expired', updated_at = unixepoch() WHERE state IN ('pending', 'uploaded') AND expires_at < unixepoch()") .run();
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE organization_usage
+           SET reserved_upload_bytes = MAX(0, reserved_upload_bytes - COALESCE((
+             SELECT SUM(reserved_bytes) FROM upload_sessions
+              WHERE upload_sessions.organization_id = organization_usage.organization_id
+                AND state IN ('pending', 'uploaded') AND expires_at < unixepoch()
+           ), 0)), updated_at = unixepoch()
+         WHERE EXISTS (
+           SELECT 1 FROM upload_sessions
+            WHERE upload_sessions.organization_id = organization_usage.organization_id
+              AND state IN ('pending', 'uploaded') AND expires_at < unixepoch()
+         )
+      `),
+      env.DB.prepare("UPDATE upload_sessions SET state = 'expired', updated_at = unixepoch() WHERE state IN ('pending', 'uploaded') AND expires_at < unixepoch()"),
+    ]);
     return;
   }
   throw new Error(`Job handler not implemented for ${job.kind}`);
 }
-

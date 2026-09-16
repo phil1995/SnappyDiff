@@ -49,9 +49,9 @@ export interface Env {
   GITHUB_APP_ID: string;
   GITHUB_APP_SLUG: string;
   WORKOS_API_KEY?: string;
+  WORKOS_WEBHOOK_SECRET?: string;
   WORKOS_COOKIE_PASSWORD?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_WEBHOOK_SECRET?: string;
   TOKEN_PEPPER?: string;
 }
-
