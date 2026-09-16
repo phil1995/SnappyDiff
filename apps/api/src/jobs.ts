@@ -87,14 +87,21 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
   if (job.kind === "reconcile") {
     await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < unixepoch()").run();
     await env.DB.prepare("UPDATE jobs SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL WHERE status = 'running' AND lease_expires_at < unixepoch()") .run();
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE run_shards SET state = 'failed', updated_at = unixepoch()
+         WHERE state IN ('open', 'sealed', 'verifying') AND run_id IN (
+           SELECT id FROM runs WHERE state IN ('open', 'verifying') AND deadline_at < unixepoch()
+         )
+      `),
+      env.DB.prepare("UPDATE runs SET state = 'timed_out', updated_at = unixepoch() WHERE state IN ('open', 'verifying') AND deadline_at < unixepoch()"),
+    ]);
     return;
   }
   if (job.kind === "cleanup") {
     const removable = await env.DB.prepare(`
       SELECT id, temporary_key FROM upload_sessions
-       WHERE temporary_deleted_at IS NULL AND (
-         (state IN ('pending', 'uploaded') AND expires_at < unixepoch()) OR state IN ('expired', 'published', 'failed')
-       ) LIMIT 500
+       WHERE temporary_deleted_at IS NULL AND expires_at < unixepoch() LIMIT 500
     `).all<{ id: string; temporary_key: string }>();
     await env.DB.batch([
       env.DB.prepare(`
@@ -102,15 +109,15 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
            SET reserved_upload_bytes = MAX(0, reserved_upload_bytes - COALESCE((
              SELECT SUM(reserved_bytes) FROM upload_sessions
               WHERE upload_sessions.organization_id = organization_usage.organization_id
-                AND state IN ('pending', 'uploaded') AND expires_at < unixepoch()
+                AND state IN ('pending', 'uploaded', 'verifying') AND expires_at < unixepoch()
            ), 0)), updated_at = unixepoch()
          WHERE EXISTS (
            SELECT 1 FROM upload_sessions
             WHERE upload_sessions.organization_id = organization_usage.organization_id
-              AND state IN ('pending', 'uploaded') AND expires_at < unixepoch()
+              AND state IN ('pending', 'uploaded', 'verifying') AND expires_at < unixepoch()
          )
       `),
-      env.DB.prepare("UPDATE upload_sessions SET state = 'expired', updated_at = unixepoch() WHERE state IN ('pending', 'uploaded') AND expires_at < unixepoch()"),
+      env.DB.prepare("UPDATE upload_sessions SET state = 'expired', updated_at = unixepoch() WHERE state IN ('pending', 'uploaded', 'verifying') AND expires_at < unixepoch()"),
     ]);
     const rows = removable.results ?? [];
     if (rows.length > 0) {

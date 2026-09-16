@@ -51,10 +51,15 @@ export async function createUploadTarget(
   objectUrl.searchParams.set("X-Amz-Expires", String(FIFTEEN_MINUTES));
   const signed = await client.sign(objectUrl, {
     method: "PUT",
-    headers: { "content-type": "image/png" },
-    aws: { signQuery: true },
+    headers: { "content-type": "image/png", "content-length": String(session.expectedBytes) },
+    aws: { signQuery: true, allHeaders: true },
   });
-  return { url: signed.url, method: "PUT", headers: { "content-type": "image/png" }, expiresAt };
+  return {
+    url: signed.url,
+    method: "PUT",
+    headers: { "content-type": "image/png", "content-length": String(session.expectedBytes) },
+    expiresAt,
+  };
 }
 
 export async function handleLocalUpload(request: Request, env: Env, sessionId: string): Promise<Response> {
@@ -77,4 +82,3 @@ export async function handleLocalUpload(request: Request, env: Env, sessionId: s
     .bind(sessionId, grant.organizationId).run();
   return json({ uploaded: true });
 }
-

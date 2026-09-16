@@ -1,5 +1,5 @@
 import { randomId, sha256 } from "./crypto.ts";
-import { enqueueJob, type PendingJob } from "./jobs.ts";
+import type { PendingJob } from "./jobs.ts";
 import type { Env } from "./platform.ts";
 
 interface VerificationPayload {
@@ -23,25 +23,34 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
     expected_bytes: number; temporary_key: string; object_version: string; reserved_bytes: number;
     state: string; width: number; height: number;
   }>();
-  if (!upload || upload.state === "published" || upload.state === "failed") return;
+  if (!upload || upload.state === "failed" || upload.state === "expired") return;
   if (upload.object_version !== payload.objectVersion) return;
+  if (upload.state === "published") {
+    await ensureShardCompletionOutbox(env, upload);
+    return;
+  }
+  const claim = await env.DB.prepare(`
+    UPDATE upload_sessions SET state = 'verifying', updated_at = unixepoch()
+     WHERE id = ? AND organization_id = ? AND object_version = ? AND state IN ('uploaded', 'verifying')
+  `).bind(upload.id, upload.organization_id, payload.objectVersion).run();
+  if (Number(claim.meta?.["changes"] ?? 0) !== 1) return;
   const object = await env.IMAGES.get(upload.temporary_key);
   if (!object || object.version !== payload.objectVersion || object.size !== upload.expected_bytes) throw new Error("Uploaded object is missing or changed");
   const bytes = await object.arrayBuffer();
   const actualHash = await sha256(bytes);
   if (object.httpMetadata?.contentType !== "image/png" || actualHash !== upload.expected_sha256) {
-    await failUpload(env, upload, "Uploaded object content type or SHA-256 does not match manifest");
+    await failUpload(env, upload, payload.objectVersion, "Uploaded object content type or SHA-256 does not match manifest");
     return;
   }
   let dimensions: { width: number; height: number };
   try {
     dimensions = parsePngDimensions(new Uint8Array(bytes));
   } catch (error) {
-    await failUpload(env, upload, String(error));
+    await failUpload(env, upload, payload.objectVersion, String(error));
     return;
   }
   if (dimensions.width !== upload.width || dimensions.height !== upload.height) {
-    await failUpload(env, upload, "Uploaded PNG dimensions do not match manifest");
+    await failUpload(env, upload, payload.objectVersion, "Uploaded PNG dimensions do not match manifest");
     return;
   }
 
@@ -54,64 +63,98 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
   const imageId = `img_${(await sha256(`${upload.organization_id}:${actualHash}`)).slice(0, 32)}`;
   await env.DB.batch([
     env.DB.prepare(`
-      UPDATE organization_usage SET stored_bytes = stored_bytes + ?, updated_at = unixepoch()
-       WHERE organization_id = ? AND NOT EXISTS (
-         SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ?
+      UPDATE organization_usage SET
+        stored_bytes = stored_bytes + CASE WHEN NOT EXISTS (
+          SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ?
+        ) THEN ? ELSE 0 END,
+        reserved_upload_bytes = reserved_upload_bytes - ?, updated_at = unixepoch()
+       WHERE organization_id = ? AND EXISTS (
+         SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
+           AND state = 'verifying' AND object_version = ?
        )
-    `).bind(upload.expected_bytes, upload.organization_id, upload.organization_id, actualHash),
+    `).bind(upload.organization_id, actualHash, upload.expected_bytes, upload.reserved_bytes,
+      upload.organization_id, upload.id, upload.organization_id, payload.objectVersion),
     env.DB.prepare(`
       INSERT INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
-      VALUES (?, ?, ?, ?, 'image/png', ?, ?, ?) ON CONFLICT (organization_id, sha256) DO NOTHING
-    `).bind(imageId, upload.organization_id, actualHash, canonicalKey, upload.expected_bytes, dimensions.width, dimensions.height),
+      SELECT ?, ?, ?, ?, 'image/png', ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
+          AND state = 'verifying' AND object_version = ?
+      ) ON CONFLICT (organization_id, sha256) DO NOTHING
+    `).bind(imageId, upload.organization_id, actualHash, canonicalKey, upload.expected_bytes, dimensions.width, dimensions.height,
+      upload.id, upload.organization_id, payload.objectVersion),
+    env.DB.prepare(`
+      UPDATE manifest_entries SET image_id = (
+        SELECT id FROM images WHERE organization_id = ? AND sha256 = ? AND reference_state = 'active'
+      )
+       WHERE organization_id = ? AND run_id = ? AND shard_id = ? AND sha256 = ? AND image_id IS NULL
+         AND EXISTS (SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
+           AND state = 'verifying' AND object_version = ?)
+    `).bind(upload.organization_id, actualHash, upload.organization_id, upload.run_id, upload.shard_id, actualHash,
+      upload.id, upload.organization_id, payload.objectVersion),
+    env.DB.prepare(`
+      UPDATE upload_sessions SET state = 'published', updated_at = unixepoch()
+       WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?
+    `).bind(upload.id, upload.organization_id, payload.objectVersion),
+    env.DB.prepare(`
+      UPDATE run_shards SET state = 'verified', updated_at = unixepoch()
+       WHERE id = ? AND organization_id = ? AND state = 'verifying'
+         AND NOT EXISTS (SELECT 1 FROM manifest_entries WHERE organization_id = ? AND run_id = ? AND shard_id = ? AND image_id IS NULL)
+    `).bind(upload.shard_id, upload.organization_id, upload.organization_id, upload.run_id, upload.shard_id),
+    completionJobStatement(env, upload),
   ]);
-  const image = await env.DB.prepare("SELECT id FROM images WHERE organization_id = ? AND sha256 = ? AND reference_state = 'active'")
-    .bind(upload.organization_id, actualHash).first<{ id: string }>();
-  if (!image) throw new Error("Canonical image metadata could not be published");
+}
+
+function completionJobStatement(
+  env: Env,
+  upload: { organization_id: string; run_id: string; shard_id: string },
+) {
+  return env.DB.prepare(`
+    INSERT INTO jobs (id, organization_id, kind, deduplication_key, payload_json)
+    SELECT ?, ?, 'complete_run', ?, ? WHERE EXISTS (
+      SELECT 1 FROM run_shards WHERE id = ? AND organization_id = ? AND state = 'verified'
+    ) ON CONFLICT (organization_id, deduplication_key) DO NOTHING
+  `).bind(randomId("job"), upload.organization_id, `complete:${upload.run_id}:${upload.shard_id}`,
+    JSON.stringify({ runId: upload.run_id }), upload.shard_id, upload.organization_id);
+}
+
+async function ensureShardCompletionOutbox(
+  env: Env,
+  upload: { organization_id: string; run_id: string; shard_id: string },
+): Promise<void> {
   await env.DB.batch([
     env.DB.prepare(`
-      UPDATE organization_usage SET reserved_upload_bytes = MAX(0, reserved_upload_bytes - ?),
-        updated_at = unixepoch() WHERE organization_id = ?
-    `).bind(upload.reserved_bytes, upload.organization_id),
-    env.DB.prepare(`
-      UPDATE manifest_entries SET image_id = ?
-       WHERE organization_id = ? AND run_id = ? AND shard_id = ? AND sha256 = ? AND image_id IS NULL
-    `).bind(image.id, upload.organization_id, upload.run_id, upload.shard_id, actualHash),
-    env.DB.prepare("UPDATE upload_sessions SET state = 'published', updated_at = unixepoch() WHERE id = ? AND organization_id = ?")
-      .bind(upload.id, upload.organization_id),
+      UPDATE run_shards SET state = 'verified', updated_at = unixepoch()
+       WHERE id = ? AND organization_id = ? AND state = 'verifying'
+         AND NOT EXISTS (SELECT 1 FROM manifest_entries WHERE organization_id = ? AND run_id = ? AND shard_id = ? AND image_id IS NULL)
+    `).bind(upload.shard_id, upload.organization_id, upload.organization_id, upload.run_id, upload.shard_id),
+    completionJobStatement(env, upload),
   ]);
-  await env.IMAGES.delete(upload.temporary_key);
-  await env.DB.prepare("UPDATE upload_sessions SET temporary_deleted_at = unixepoch(), updated_at = unixepoch() WHERE id = ? AND organization_id = ?")
-    .bind(upload.id, upload.organization_id).run();
-  const pending = await env.DB.prepare(`
-    SELECT COUNT(*) AS count FROM manifest_entries
-     WHERE organization_id = ? AND run_id = ? AND shard_id = ? AND image_id IS NULL
-  `).bind(upload.organization_id, upload.run_id, upload.shard_id).first<{ count: number }>();
-  if (pending?.count === 0) {
-    await env.DB.prepare("UPDATE run_shards SET state = 'verified', updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND state = 'verifying'")
-      .bind(upload.shard_id, upload.organization_id).run();
-    await enqueueJob(env, upload.organization_id, "complete_run", `complete:${upload.run_id}:${upload.shard_id}`, { runId: upload.run_id });
-  }
 }
 
 async function failUpload(
   env: Env,
-  upload: { id: string; organization_id: string; run_id: string; shard_id: string; reserved_bytes: number; temporary_key: string },
+  upload: { id: string; organization_id: string; run_id: string; shard_id: string; reserved_bytes: number },
+  objectVersion: string,
   reason: string,
 ): Promise<void> {
   await env.DB.batch([
-    env.DB.prepare("UPDATE organization_usage SET reserved_upload_bytes = MAX(0, reserved_upload_bytes - ?), updated_at = unixepoch() WHERE organization_id = ?")
-      .bind(upload.reserved_bytes, upload.organization_id),
-    env.DB.prepare("UPDATE upload_sessions SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ?")
-      .bind(upload.id, upload.organization_id),
-    env.DB.prepare("UPDATE run_shards SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ?")
-      .bind(upload.shard_id, upload.organization_id),
-    env.DB.prepare("UPDATE runs SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ?")
-      .bind(upload.run_id, upload.organization_id),
+    env.DB.prepare(`
+      UPDATE organization_usage SET reserved_upload_bytes = reserved_upload_bytes - ?, updated_at = unixepoch()
+       WHERE organization_id = ? AND EXISTS (SELECT 1 FROM upload_sessions
+         WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?)
+    `).bind(upload.reserved_bytes, upload.organization_id, upload.id, upload.organization_id, objectVersion),
+    env.DB.prepare(`
+      UPDATE run_shards SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ?
+       AND EXISTS (SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?)
+    `).bind(upload.shard_id, upload.organization_id, upload.id, upload.organization_id, objectVersion),
+    env.DB.prepare(`
+      UPDATE runs SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ?
+       AND EXISTS (SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?)
+    `).bind(upload.run_id, upload.organization_id, upload.id, upload.organization_id, objectVersion),
+    env.DB.prepare("UPDATE upload_sessions SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?")
+      .bind(upload.id, upload.organization_id, objectVersion),
   ]);
   console.warn(JSON.stringify({ level: "warn", event: "upload_verification_failed", uploadId: upload.id, reason }));
-  await env.IMAGES.delete(upload.temporary_key);
-  await env.DB.prepare("UPDATE upload_sessions SET temporary_deleted_at = unixepoch(), updated_at = unixepoch() WHERE id = ? AND organization_id = ?")
-    .bind(upload.id, upload.organization_id).run();
 }
 
 export async function completeRunJob(env: Env, job: PendingJob): Promise<void> {

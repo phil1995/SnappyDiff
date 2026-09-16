@@ -40,53 +40,52 @@ export async function registerRun(
      WHERE p.id = ? AND p.organization_id = ? AND p.deleted_at IS NULL
   `).bind(projectId, principal.organizationId).first<{ id: string; suite_id: string }>();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
+  const proposedRunId = randomId("run");
+  const deadline = Math.floor(Date.now() / 1000) + LIMITS.unfinishedRunSeconds;
+  const inserted = await env.DB.prepare(`
+    INSERT INTO runs
+      (id, organization_id, project_id, suite_id, provider, provider_run_id, attempt_number, run_key,
+       commit_sha, branch, merge_base_sha, observed_default_head_sha, pull_request_number, trust_class,
+       expected_shards_json, allow_empty, deadline_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (organization_id, project_id, provider, provider_run_id, attempt_number) DO NOTHING
+  `).bind(
+    proposedRunId, principal.organizationId, projectId, project.suite_id, identity.provider, identity.providerRunId,
+    identity.attemptNumber, identity.runKey, identity.commitSha, identity.branch, identity.mergeBaseSha ?? null,
+    identity.observedDefaultHeadSha ?? null, identity.pullRequestNumber ?? null, identity.trustClass,
+    JSON.stringify(identity.expectedShards), body.allowEmpty === true ? 1 : 0, deadline,
+  ).run();
   const existing = await env.DB.prepare(`
     SELECT id, expected_shards_json, run_key, commit_sha, branch, merge_base_sha,
-      observed_default_head_sha, pull_request_number, trust_class, allow_empty
+      observed_default_head_sha, pull_request_number, trust_class, allow_empty, state, deadline_at
       FROM runs
      WHERE organization_id = ? AND project_id = ? AND provider = ? AND provider_run_id = ? AND attempt_number = ?
   `).bind(principal.organizationId, projectId, identity.provider, identity.providerRunId, identity.attemptNumber)
     .first<{
       id: string; expected_shards_json: string; run_key: string; commit_sha: string; branch: string;
       merge_base_sha: string | null; observed_default_head_sha: string | null; pull_request_number: number | null;
-      trust_class: string; allow_empty: number;
+      trust_class: string; allow_empty: number; state: string; deadline_at: number;
     }>();
-  let runId = existing?.id;
-  if (existing) {
-    const matches = existing.expected_shards_json === JSON.stringify(identity.expectedShards)
+  if (!existing) throw new Error("Run registration could not be persisted");
+  const runId = existing.id;
+  const matches = existing.expected_shards_json === JSON.stringify(identity.expectedShards)
       && existing.run_key === identity.runKey && existing.commit_sha === identity.commitSha
       && existing.branch === identity.branch && existing.merge_base_sha === (identity.mergeBaseSha ?? null)
       && existing.observed_default_head_sha === (identity.observedDefaultHeadSha ?? null)
       && existing.pull_request_number === (identity.pullRequestNumber ?? null)
       && existing.trust_class === identity.trustClass && existing.allow_empty === (body.allowEmpty === true ? 1 : 0);
-    if (!matches) {
-      throw new HttpError(409, "run_identity_conflict", "Run attempt already exists with different immutable metadata");
-    }
-  } else {
-    runId = randomId("run");
-    const deadline = Math.floor(Date.now() / 1000) + LIMITS.unfinishedRunSeconds;
-    await env.DB.prepare(`
-      INSERT INTO runs
-        (id, organization_id, project_id, suite_id, provider, provider_run_id, attempt_number, run_key,
-         commit_sha, branch, merge_base_sha, observed_default_head_sha, pull_request_number, trust_class,
-         expected_shards_json, allow_empty, deadline_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      runId, principal.organizationId, projectId, project.suite_id, identity.provider, identity.providerRunId,
-      identity.attemptNumber, identity.runKey, identity.commitSha, identity.branch, identity.mergeBaseSha ?? null,
-      identity.observedDefaultHeadSha ?? null, identity.pullRequestNumber ?? null, identity.trustClass,
-      JSON.stringify(identity.expectedShards), body.allowEmpty === true ? 1 : 0, deadline,
-    ).run();
-  }
-  let shard = await env.DB.prepare("SELECT id, shard_key, state FROM run_shards WHERE organization_id = ? AND run_id = ? AND shard_key = ?")
+  if (!matches) throw new HttpError(409, "run_identity_conflict", "Run attempt already exists with different immutable metadata");
+  const proposedShardId = randomId("shd");
+  await env.DB.prepare(`
+    INSERT INTO run_shards (id, organization_id, run_id, shard_key)
+    SELECT ?, ?, ?, ? FROM runs WHERE id = ? AND organization_id = ? AND state = 'open' AND deadline_at > unixepoch()
+    ON CONFLICT (organization_id, run_id, shard_key) DO NOTHING
+  `).bind(proposedShardId, principal.organizationId, runId, shardKey, runId, principal.organizationId).run();
+  const shard = await env.DB.prepare("SELECT id, shard_key, state FROM run_shards WHERE organization_id = ? AND run_id = ? AND shard_key = ?")
     .bind(principal.organizationId, runId, shardKey).first<{ id: string; shard_key: string; state: string }>();
-  if (!shard) {
-    const shardId = randomId("shd");
-    await env.DB.prepare("INSERT INTO run_shards (id, organization_id, run_id, shard_key) VALUES (?, ?, ?, ?)")
-      .bind(shardId, principal.organizationId, runId, shardKey).run();
-    shard = { id: shardId, shard_key: shardKey, state: "open" };
-  }
-  return json({ run: { id: runId }, shard: { id: shard.id, key: shard.shard_key, state: shard.state } }, { status: existing ? 200 : 201 });
+  if (!shard) throw new HttpError(409, "run_closed", "Run attempt is no longer open");
+  return json({ run: { id: runId, state: existing.state }, shard: { id: shard.id, key: shard.shard_key, state: shard.state } },
+    { status: Number(inserted.meta?.["changes"] ?? 0) === 1 ? 201 : 200 });
 }
 
 export async function submitManifestPage(
@@ -105,7 +104,7 @@ export async function submitManifestPage(
   const entries = body.entries.map(validateEntry);
   const canonical = JSON.stringify(entries);
   const digest = await sha256(canonical);
-  await requireOpenShard(env, principal, runId, shardId);
+  await requireOwnedRun(env, principal, runId);
   const existing = await env.DB.prepare(`
     SELECT page_number, content_digest FROM manifest_pages
      WHERE organization_id = ? AND shard_id = ? AND (page_number = ? OR idempotency_key = ?)
@@ -114,6 +113,7 @@ export async function submitManifestPage(
     if (existing.page_number !== page || existing.content_digest !== digest) throw new HttpError(409, "manifest_page_conflict", "Idempotency key or page number was reused with different content");
     return json({ page, digest, repeated: true });
   }
+  await requireOpenShard(env, principal, runId, shardId);
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(`INSERT INTO manifest_pages
       (id, organization_id, run_id, shard_id, page_number, total_pages, content_digest, idempotency_key, entries_json)
@@ -130,6 +130,7 @@ export async function submitManifestPage(
     await env.DB.batch(statements);
   } catch (error) {
     if (String(error).includes("UNIQUE")) throw new HttpError(409, "duplicate_screenshot_name", "Screenshot names must be unique across all run shards");
+    if (String(error).includes("shard_not_open")) throw new HttpError(409, "shard_sealed", "Run shard is no longer open for manifest pages");
     throw error;
   }
   return json({ page, digest, repeated: false }, { status: 201 });
@@ -146,18 +147,35 @@ export async function finalizeShard(
     .bind(shardId, principal.organizationId, runId).first<{ id: string; state: string }>();
   if (!shard) throw new HttpError(404, "shard_not_found", "Run shard was not found");
   if (shard.state !== "open") return json({ shard, repeated: true });
+  const preflight = await env.DB.prepare(`
+    SELECT COUNT(*) AS count, MIN(total_pages) AS min_pages, MAX(total_pages) AS max_pages
+      FROM manifest_pages WHERE organization_id = ? AND run_id = ? AND shard_id = ?
+  `).bind(principal.organizationId, runId, shardId).first<{ count: number; min_pages: number | null; max_pages: number | null }>();
+  if (!preflight || preflight.count === 0 || preflight.min_pages !== preflight.max_pages || preflight.count !== preflight.max_pages) {
+    throw new HttpError(409, "manifest_incomplete", "All manifest pages must be present with one consistent total");
+  }
+  await env.DB.prepare("INSERT INTO shard_finalizations (organization_id, shard_id) VALUES (?, ?) ON CONFLICT DO NOTHING")
+    .bind(principal.organizationId, shardId).run();
+  const leaseOwner = randomId("seal");
+  const claim = await env.DB.prepare(`
+    UPDATE shard_finalizations SET lease_owner = ?, lease_expires_at = unixepoch() + 300
+     WHERE organization_id = ? AND shard_id = ? AND (lease_owner IS NULL OR lease_expires_at < unixepoch())
+  `).bind(leaseOwner, principal.organizationId, shardId).run();
+  if (Number(claim.meta?.["changes"] ?? 0) !== 1) return json({ shard: { ...shard, state: "sealing" }, repeated: true }, { status: 202 });
   const pages = await env.DB.prepare(`
     SELECT COUNT(*) AS count, MIN(total_pages) AS min_pages, MAX(total_pages) AS max_pages
       FROM manifest_pages WHERE organization_id = ? AND run_id = ? AND shard_id = ?
   `).bind(principal.organizationId, runId, shardId).first<{ count: number; min_pages: number | null; max_pages: number | null }>();
   if (!pages || pages.count === 0 || pages.min_pages !== pages.max_pages || pages.count !== pages.max_pages) {
-    throw new HttpError(409, "manifest_incomplete", "All manifest pages must be present with one consistent total");
+    await releaseFinalizationLease(env, principal.organizationId, shardId, leaseOwner);
+    throw new HttpError(409, "manifest_incomplete", "Manifest changed before it could be sealed");
   }
   const totals = await env.DB.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(byte_size), 0) AS bytes
       FROM manifest_entries WHERE organization_id = ? AND run_id = ?
   `).bind(principal.organizationId, runId).first<{ count: number; bytes: number }>();
   if (!totals || totals.count > LIMITS.screenshotsPerRun || totals.bytes > LIMITS.logicalRunBytes) {
+    await failFinalization(env, principal.organizationId, runId, shardId);
     throw new HttpError(413, "run_limit_exceeded", "Run exceeds screenshot count or logical byte limits");
   }
   const inconsistent = await env.DB.prepare(`
@@ -165,7 +183,20 @@ export async function finalizeShard(
      GROUP BY sha256 HAVING MIN(byte_size) != MAX(byte_size) OR MIN(width) != MAX(width) OR MIN(height) != MAX(height)
      LIMIT 1
   `).bind(principal.organizationId, runId).first();
-  if (inconsistent) throw new HttpError(409, "hash_metadata_conflict", "The same hash was declared with inconsistent metadata");
+  if (inconsistent) {
+    await failFinalization(env, principal.organizationId, runId, shardId);
+    throw new HttpError(409, "hash_metadata_conflict", "The same hash was declared with inconsistent metadata");
+  }
+  const canonicalMismatch = await env.DB.prepare(`
+    SELECT m.sha256 FROM manifest_entries m JOIN images i
+      ON i.organization_id = m.organization_id AND i.sha256 = m.sha256 AND i.reference_state = 'active'
+     WHERE m.organization_id = ? AND m.run_id = ?
+       AND (m.byte_size != i.byte_size OR m.width != i.width OR m.height != i.height) LIMIT 1
+  `).bind(principal.organizationId, runId).first();
+  if (canonicalMismatch) {
+    await failFinalization(env, principal.organizationId, runId, shardId);
+    throw new HttpError(409, "canonical_metadata_conflict", "Manifest metadata does not match the verified canonical image");
+  }
   await env.DB.prepare(`
     UPDATE manifest_entries SET image_id = (
       SELECT id FROM images WHERE images.organization_id = manifest_entries.organization_id
@@ -182,10 +213,7 @@ export async function finalizeShard(
   `).bind(principal.organizationId, runId, shardId).first<{ bytes: number }>();
   const missingBytes = missing?.bytes ?? 0;
   const now = Math.floor(Date.now() / 1000);
-  const statements: D1PreparedStatement[] = [
-    env.DB.prepare("INSERT INTO shard_finalizations (organization_id, shard_id) VALUES (?, ?)")
-      .bind(principal.organizationId, shardId),
-  ];
+  const statements: D1PreparedStatement[] = [];
   if (missingBytes > 0) {
     statements.push(env.DB.prepare(`
       UPDATE organization_usage SET reserved_upload_bytes = reserved_upload_bytes + ?, updated_at = unixepoch()
@@ -206,20 +234,37 @@ export async function finalizeShard(
   statements.push(env.DB.prepare(`
     UPDATE run_shards SET state = ?, expected_pages = ?, received_pages = ?, finalized_at = unixepoch(), updated_at = unixepoch()
      WHERE organization_id = ? AND id = ? AND state = 'open'
-  `).bind(missingBytes === 0 ? "verified" : "verifying", pages.max_pages, pages.count, principal.organizationId, shardId));
+       AND EXISTS (SELECT 1 FROM shard_finalizations WHERE organization_id = ? AND shard_id = ? AND lease_owner = ?)
+  `).bind(missingBytes === 0 ? "verified" : "verifying", pages.max_pages, pages.count,
+    principal.organizationId, shardId, principal.organizationId, shardId, leaseOwner));
+  if (missingBytes === 0) {
+    statements.push(env.DB.prepare(`
+      INSERT INTO jobs (id, organization_id, kind, deduplication_key, payload_json)
+      VALUES (?, ?, 'complete_run', ?, ?) ON CONFLICT (organization_id, deduplication_key) DO NOTHING
+    `).bind(randomId("job"), principal.organizationId, `complete:${runId}:${shardId}`, JSON.stringify({ runId })));
+  }
   try {
     await env.DB.batch(statements);
   } catch (error) {
-    if (String(error).includes("UNIQUE")) {
-      const repeated = await env.DB.prepare("SELECT id, state FROM run_shards WHERE id = ? AND organization_id = ?")
-        .bind(shardId, principal.organizationId).first();
-      return json({ shard: repeated, repeated: true });
-    }
+    await releaseFinalizationLease(env, principal.organizationId, shardId, leaseOwner);
     if (String(error).includes("CHECK constraint failed")) throw new HttpError(429, "upload_budget_exceeded", "Organization upload budget is exhausted");
     throw error;
   }
-  if (missingBytes === 0) await enqueueJob(env, principal.organizationId, "complete_run", `complete:${runId}:${shardId}`, { runId });
   return json({ shard: { id: shard.id, state: missingBytes === 0 ? "verified" : "verifying" }, missingBytes });
+}
+
+async function releaseFinalizationLease(env: Env, organizationId: string, shardId: string, leaseOwner: string): Promise<void> {
+  await env.DB.prepare("UPDATE shard_finalizations SET lease_owner = NULL, lease_expires_at = NULL WHERE organization_id = ? AND shard_id = ? AND lease_owner = ?")
+    .bind(organizationId, shardId, leaseOwner).run();
+}
+
+async function failFinalization(env: Env, organizationId: string, runId: string, shardId: string): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("UPDATE run_shards SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND state = 'open'")
+      .bind(shardId, organizationId),
+    env.DB.prepare("UPDATE runs SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND state = 'open'")
+      .bind(runId, organizationId),
+  ]);
 }
 
 export async function listShardUploads(
@@ -294,10 +339,13 @@ async function requireOpenShard(
   shardId: string,
 ): Promise<{ id: string; state: string }> {
   await requireOwnedRun(env, principal, runId);
-  const shard = await env.DB.prepare("SELECT id, state FROM run_shards WHERE id = ? AND organization_id = ? AND run_id = ?")
+  const shard = await env.DB.prepare(`
+    SELECT s.id, s.state FROM run_shards s JOIN runs r ON r.id = s.run_id AND r.organization_id = s.organization_id
+     WHERE s.id = ? AND s.organization_id = ? AND s.run_id = ? AND s.state = 'open'
+       AND r.state = 'open' AND r.deadline_at > unixepoch()
+  `)
     .bind(shardId, principal.organizationId, runId).first<{ id: string; state: string }>();
   if (!shard) throw new HttpError(404, "shard_not_found", "Run shard was not found");
-  if (shard.state !== "open") throw new HttpError(409, "shard_sealed", "Run shard is already finalized");
   return shard;
 }
 
