@@ -73,4 +73,5 @@ export interface Env {
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
+  GITHUB_OIDC_AUDIENCE: string;
 }

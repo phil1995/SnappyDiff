@@ -9,6 +9,9 @@ import { handleWorkOSWebhook } from "./workos-webhook.ts";
 import { requireMachinePrincipal } from "./machine-auth.ts";
 import { handleLocalUpload } from "./upload-urls.ts";
 import { completeUpload, finalizeShard, getRunStatus, listShardUploads, registerRun, submitManifestPage } from "./uploads.ts";
+import { handleGitHubWebhook, linkGitHubInstallation } from "./github.ts";
+import { decideComparison, getComparison } from "./reports.ts";
+import { exchangeGitHubOidc } from "./github-oidc.ts";
 
 const API_PREFIX = "/api/v1";
 
@@ -28,6 +31,18 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     const ipKey = await requestRateKey(request, "workos-webhook");
     await enforceRateLimit(env, ipKey, 120, 60);
     return handleWorkOSWebhook(request, env, context.requestId);
+  }
+  if (url.pathname === "/webhooks/github" && request.method === "POST") {
+    const ipKey = await requestRateKey(request, "github-webhook");
+    await enforceRateLimit(env, ipKey, 300, 60);
+    const response = await handleGitHubWebhook(request, env);
+    execution.waitUntil(drainJobs(env, 10));
+    return response;
+  }
+  if (url.pathname === `${API_PREFIX}/auth/github-oidc/exchange` && request.method === "POST") {
+    const ipKey = await requestRateKey(request, "github-oidc");
+    await enforceRateLimit(env, ipKey, 60, 60);
+    return exchangeGitHubOidc(request, env);
   }
 
   const localUploadMatch = url.pathname.match(/^\/api\/v1\/uploads\/([A-Za-z0-9_]+)\/content$/);
@@ -68,6 +83,16 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     if (url.pathname === `${API_PREFIX}/projects`) {
       if (request.method === "GET") return listProjects(env, session);
       if (request.method === "POST") return createProject(request, env, session, context);
+    }
+    const installationLink = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/github-installation$/);
+    if (installationLink?.[1] && request.method === "POST") return linkGitHubInstallation(request, env, session, installationLink[1], context);
+    const comparisonMatch = url.pathname.match(/^\/api\/v1\/comparisons\/([A-Za-z0-9_]+)$/);
+    if (comparisonMatch?.[1] && request.method === "GET") return getComparison(env, session, comparisonMatch[1], url.searchParams.get("after"));
+    const decisionMatch = url.pathname.match(/^\/api\/v1\/comparisons\/([A-Za-z0-9_]+)\/decision$/);
+    if (decisionMatch?.[1] && request.method === "POST") {
+      const response = await decideComparison(request, env, session, decisionMatch[1], context);
+      execution.waitUntil(drainJobs(env, 10));
+      return response;
     }
     const projectMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)$/);
     if (projectMatch?.[1] && request.method === "GET") return getProject(env, session, projectMatch[1]);

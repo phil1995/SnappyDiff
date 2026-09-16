@@ -9,6 +9,7 @@ const requiredVariables = [
   "GITHUB_APP_SLUG",
   "R2_BUCKET_NAME",
   "CLOUDFLARE_ACCOUNT_ID",
+  "GITHUB_OIDC_AUDIENCE",
 ];
 
 const requiredSecrets = [

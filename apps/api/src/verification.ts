@@ -191,6 +191,10 @@ export async function completeRunJob(env: Env, job: PendingJob): Promise<void> {
         completed_at = unixepoch(), updated_at = unixepoch()
       WHERE id = ? AND organization_id = ? AND state IN ('open', 'verifying')
     `).bind(totals.count, totals.bytes, runId, run.organization_id),
+    env.DB.prepare(`
+      INSERT INTO jobs (id, organization_id, kind, deduplication_key, payload_json)
+      VALUES (?, ?, 'select_baseline', ?, ?) ON CONFLICT (organization_id, deduplication_key) DO NOTHING
+    `).bind(randomId("job"), run.organization_id, `baseline:${runId}`, JSON.stringify({ runId })),
   ]);
 }
 

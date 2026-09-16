@@ -30,6 +30,8 @@ Set `CLOUDFLARE_ACCOUNT_ID` and `R2_BUCKET_NAME` as non-secret environment varia
 
 Rotate secrets independently. Token hashes are peppered; rotating `TOKEN_PEPPER` requires a controlled token reissue window.
 
+See `github-setup.md` for the GitHub App permissions, webhooks, installation-link step, and credential-free Actions configuration.
+
 ## Rollback
 
 Worker code can be rolled back independently. Database migrations are forward-only and must remain compatible with the prior Worker during a rollout. Destructive schema cleanup requires a later migration after the rollback window. R2 canonical objects are immutable and are never removed as part of application rollback.

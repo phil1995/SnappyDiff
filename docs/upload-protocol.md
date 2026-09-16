@@ -15,7 +15,7 @@ Abandoned sessions expire after 24 hours. Cleanup releases reserved bytes and de
 
 Copy `.snappydiff.example.json` to `.snappydiff.json` and commit the non-secret endpoint, project ID, and desired concurrency. Supply `SNAPPYDIFF_TOKEN` only through the CI secret store. Command flags and environment variables override file defaults.
 
-The `login` command is intentionally gated until the WorkOS device-authorization spike in `docs/provider-validation.md` has passed. Project tokens are the implemented authentication path for this milestone; GitHub Actions OIDC is enabled only after its claim/repository-binding gate passes.
+The `login` command is intentionally gated until the WorkOS device-authorization spike in `docs/provider-validation.md` has passed. Project tokens support other CI systems. In GitHub Actions, the CLI automatically uses OIDC when `SNAPPYDIFF_TOKEN` is absent; the live claim/repository-binding gate must pass before that path is enabled outside disposable staging.
 
 ## Limits
 
@@ -25,4 +25,3 @@ The `login` command is intentionally gated until the WorkOS device-authorization
 - 100 entries and 4 MiB per manifest page
 - 256 declared shards per run attempt
 - upload concurrency from 1 to 32 (default 4)
-

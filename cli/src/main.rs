@@ -64,6 +64,10 @@ struct UploadArgs {
     default_head: Option<String>,
     #[arg(long)]
     pull_request: Option<u64>,
+    #[arg(long = "parent")]
+    parents: Vec<String>,
+    #[arg(long)]
+    graph_incomplete: bool,
     #[arg(long)]
     fork: bool,
     #[arg(long)]
@@ -78,7 +82,12 @@ struct FileConfig {
     endpoint: Option<String>,
     project: Option<String>,
     upload_concurrency: Option<usize>,
+    oidc_audience: Option<String>,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OidcExchange { token: String, trust_class: String }
 
 #[derive(Clone)]
 struct Api {
@@ -113,6 +122,8 @@ struct RunIdentity {
     pull_request_number: Option<u64>,
     expected_shards: Vec<String>,
     trust_class: &'static str,
+    parent_shas: Vec<String>,
+    graph_complete: bool,
 }
 
 #[derive(Deserialize)]
@@ -155,23 +166,56 @@ async fn run(cli: Cli) -> Result<()> {
     if matches!(cli.command, Command::Login) {
         bail!("interactive WorkOS device authorization is disabled until the provider validation gate is completed; use a scoped SNAPPYDIFF_TOKEN for CI");
     }
-    let token = cli.token.context("SNAPPYDIFF_TOKEN or --token is required")?;
-    if !token.starts_with("sd_") { bail!("project token has an invalid format"); }
     let endpoint = cli.endpoint.or(file_config.endpoint).unwrap_or_else(|| "http://localhost:8787".to_owned());
-    let api = Api { client: Client::builder().timeout(Duration::from_secs(60)).build()?, endpoint: endpoint.trim_end_matches('/').to_owned(), token };
+    let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
     match cli.command {
         Command::Upload(args) => {
             let mut args = *args;
             args.project = args.project.or(file_config.project);
             args.concurrency = args.concurrency.or(file_config.upload_concurrency);
+            let project = args.project.as_deref().context("project is required via --project, SNAPPYDIFF_PROJECT, or .snappydiff.json")?;
+            let token = if let Some(token) = cli.token {
+                token
+            } else {
+                let exchange = github_oidc_token(&client, &endpoint, project, args.pull_request, file_config.oidc_audience.as_deref()).await?;
+                args.fork = exchange.trust_class == "fork_isolated";
+                exchange.token
+            };
+            if !token.starts_with("sd_") { bail!("machine credential has an invalid format"); }
+            let api = Api { client, endpoint: endpoint.trim_end_matches('/').to_owned(), token };
             upload(&api, args, cli.json).await
         }
         Command::Status { run_id } => {
+            let token = cli.token.context("SNAPPYDIFF_TOKEN or --token is required for status")?;
+            let api = Api { client, endpoint: endpoint.trim_end_matches('/').to_owned(), token };
             let status: StatusResponse = api.get(&format!("/api/v1/runs/{run_id}")).await?;
             print_value(cli.json, &status)
         }
         Command::Login => unreachable!(),
     }
+}
+
+async fn github_oidc_token(
+    client: &Client,
+    endpoint: &str,
+    project: &str,
+    pull_request: Option<u64>,
+    configured_audience: Option<&str>,
+) -> Result<OidcExchange> {
+    let request_url = std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL").context("SNAPPYDIFF_TOKEN is unset and GitHub OIDC is unavailable")?;
+    let request_token = std::env::var("ACTIONS_ID_TOKEN_REQUEST_TOKEN").context("GitHub OIDC request token is missing")?;
+    let audience = std::env::var("SNAPPYDIFF_OIDC_AUDIENCE").ok().or_else(|| configured_audience.map(ToOwned::to_owned)).unwrap_or_else(|| "snappydiff".to_owned());
+    let response = client.get(request_url).bearer_auth(request_token).query(&[("audience", audience)]).send().await?;
+    if !response.status().is_success() { bail!("GitHub OIDC token request failed with {}", response.status()); }
+    let oidc = response.json::<serde_json::Value>().await?.get("value").and_then(|value| value.as_str()).context("GitHub OIDC response omitted token")?.to_owned();
+    let response = client.post(format!("{}/api/v1/auth/github-oidc/exchange", endpoint.trim_end_matches('/')))
+        .bearer_auth(oidc)
+        .json(&serde_json::json!({ "projectId": project, "pullRequestNumber": pull_request }))
+        .send().await?;
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    if !status.is_success() { bail!("SnappyDiff OIDC exchange failed with {status}: {}", String::from_utf8_lossy(&bytes)); }
+    serde_json::from_slice(&bytes).context("SnappyDiff returned an invalid OIDC exchange response")
 }
 
 async fn upload(api: &Api, args: UploadArgs, json_output: bool) -> Result<()> {
@@ -182,6 +226,10 @@ async fn upload(api: &Api, args: UploadArgs, json_output: bool) -> Result<()> {
     if entries.is_empty() && !args.allow_empty { bail!("no PNG screenshots found; pass --allow-empty only for an intentional full removal"); }
     let provider_run_id = args.provider_run_id.unwrap_or_else(|| format!("manual-{}", epoch_millis()));
     let expected_shards = if args.expected_shards.is_empty() { vec![args.shard.clone()] } else { args.expected_shards.clone() };
+    let explicit_parents = !args.parents.is_empty();
+    let discovered_parents = if explicit_parents { None } else { git_parents(&args.directory, &args.commit) };
+    let parent_shas = discovered_parents.clone().unwrap_or(args.parents);
+    let graph_complete = !args.graph_incomplete && (explicit_parents || discovered_parents.is_some());
     let identity = RunIdentity {
         provider: if std::env::var_os("GITHUB_ACTIONS").is_some() { "github_actions" } else { "manual" },
         run_key: args.run_key.unwrap_or_else(|| provider_run_id.clone()), provider_run_id,
@@ -189,6 +237,7 @@ async fn upload(api: &Api, args: UploadArgs, json_output: bool) -> Result<()> {
         merge_base_sha: args.merge_base, observed_default_head_sha: args.default_head,
         pull_request_number: args.pull_request, expected_shards,
         trust_class: if args.fork { "fork_isolated" } else { "first_party" },
+        parent_shas, graph_complete,
     };
     let registration: RegisterResponse = api.post(&format!("/api/v1/projects/{project}/runs"), &serde_json::json!({
         "identity": identity, "shardId": args.shard, "allowEmpty": args.allow_empty,
@@ -355,6 +404,19 @@ fn load_config(path: &Path) -> Result<FileConfig> {
     if !path.exists() { return Ok(FileConfig::default()); }
     let contents = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     serde_json::from_str(&contents).with_context(|| format!("invalid configuration in {}", path.display()))
+}
+
+fn git_parents(directory: &Path, commit: &str) -> Option<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--parents", "-n", "1", commit])
+        .current_dir(directory)
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let line = String::from_utf8(output.stdout).ok()?;
+    let mut parts = line.split_whitespace();
+    if parts.next()? != commit { return None; }
+    Some(parts.map(ToOwned::to_owned).collect())
 }
 
 #[cfg(test)]

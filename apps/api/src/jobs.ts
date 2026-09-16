@@ -1,8 +1,10 @@
 import { randomId } from "./crypto.ts";
 import type { Env } from "./platform.ts";
 import { completeRunJob, verifyUploadJob } from "./verification.ts";
+import { processBaselineJob } from "./baselines.ts";
+import { deliverGitHubCheckJob, refreshGitHubStateJob } from "./github.ts";
 
-export type JobKind = "verify_upload" | "complete_run" | "select_baseline" | "deliver_github_check" | "reconcile" | "cleanup";
+export type JobKind = "verify_upload" | "complete_run" | "select_baseline" | "deliver_github_check" | "refresh_github_state" | "reconcile" | "cleanup";
 
 export interface PendingJob {
   id: string;
@@ -84,6 +86,9 @@ export async function drainJobs(env: Env, maximum = 25): Promise<number> {
 async function executeJob(env: Env, job: PendingJob): Promise<void> {
   if (job.kind === "verify_upload") return verifyUploadJob(env, job);
   if (job.kind === "complete_run") return completeRunJob(env, job);
+  if (job.kind === "select_baseline") return processBaselineJob(env, job);
+  if (job.kind === "deliver_github_check") return deliverGitHubCheckJob(env, job);
+  if (job.kind === "refresh_github_state") return refreshGitHubStateJob(env, job);
   if (job.kind === "reconcile") {
     await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < unixepoch()").run();
     await env.DB.prepare("UPDATE jobs SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL WHERE status = 'running' AND lease_expires_at < unixepoch()") .run();

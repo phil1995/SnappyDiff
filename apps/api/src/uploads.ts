@@ -5,6 +5,7 @@ import { enqueueJob } from "./jobs.ts";
 import type { MachinePrincipal } from "./machine-auth.ts";
 import type { D1PreparedStatement, Env } from "./platform.ts";
 import { createUploadTarget } from "./upload-urls.ts";
+import { ensureInProgressGitHubCheck } from "./github.ts";
 
 interface RegisterRunBody {
   identity?: RunIdentity;
@@ -32,6 +33,9 @@ export async function registerRun(
   assertProject(principal, projectId);
   const body = await readJson<RegisterRunBody>(request);
   const identity = validateIdentity(body.identity);
+  if (principal.trustClass === "fork_isolated" && identity.trustClass !== "fork_isolated") {
+    throw new HttpError(403, "trust_class_violation", "Fork credentials can create only isolated runs");
+  }
   const shardKey = requiredIdentifier(body.shardId, "shardId");
   if (!identity.expectedShards.includes(shardKey)) throw new HttpError(400, "unexpected_shard", "Shard is not in the immutable expected set");
   const project = await env.DB.prepare(`
@@ -40,6 +44,7 @@ export async function registerRun(
      WHERE p.id = ? AND p.organization_id = ? AND p.deleted_at IS NULL
   `).bind(projectId, principal.organizationId).first<{ id: string; suite_id: string }>();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
+  await persistCommitGraph(env, principal.organizationId, projectId, identity);
   const proposedRunId = randomId("run");
   const deadline = Math.floor(Date.now() / 1000) + LIMITS.unfinishedRunSeconds;
   const inserted = await env.DB.prepare(`
@@ -84,6 +89,10 @@ export async function registerRun(
   const shard = await env.DB.prepare("SELECT id, shard_key, state FROM run_shards WHERE organization_id = ? AND run_id = ? AND shard_key = ?")
     .bind(principal.organizationId, runId, shardKey).first<{ id: string; shard_key: string; state: string }>();
   if (!shard) throw new HttpError(409, "run_closed", "Run attempt is no longer open");
+  if (identity.pullRequestNumber !== undefined) {
+    await ensureInProgressGitHubCheck(env, principal.organizationId, projectId, runId,
+      identity.pullRequestNumber, identity.attemptNumber);
+  }
   return json({ run: { id: runId, state: existing.state }, shard: { id: shard.id, key: shard.shard_key, state: shard.state } },
     { status: Number(inserted.meta?.["changes"] ?? 0) === 1 ? 201 : 200 });
 }
@@ -358,7 +367,41 @@ function validateIdentity(value: RunIdentity | undefined): RunIdentity {
   const shards = value.expectedShards.map((item) => requiredIdentifier(item, "expectedShards"));
   if (new Set(shards).size !== shards.length) throw new HttpError(400, "invalid_run_identity", "Expected shard IDs must be unique");
   if (value.trustClass !== "first_party" && value.trustClass !== "fork_isolated") throw new HttpError(400, "invalid_run_identity", "Trust class is invalid");
-  return { ...value, expectedShards: [...shards].sort() };
+  if (!isCommitSha(value.commitSha)) throw new HttpError(400, "invalid_run_identity", "Commit SHA is invalid");
+  if (!Array.isArray(value.parentShas) || value.parentShas.length > 64 || value.parentShas.some((sha) => !isCommitSha(sha))) {
+    throw new HttpError(400, "invalid_run_identity", "Commit parent SHAs are invalid");
+  }
+  if (typeof value.graphComplete !== "boolean") throw new HttpError(400, "invalid_run_identity", "graphComplete must be a boolean");
+  return { ...value, expectedShards: [...shards].sort(), parentShas: [...new Set(value.parentShas)].sort() };
+}
+
+async function persistCommitGraph(env: Env, organizationId: string, projectId: string, identity: RunIdentity): Promise<void> {
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare("INSERT INTO commits (organization_id, project_id, sha, parents_complete) VALUES (?, ?, ?, 0) ON CONFLICT DO NOTHING")
+      .bind(organizationId, projectId, identity.commitSha),
+  ];
+  for (const parent of identity.parentShas) {
+    statements.push(env.DB.prepare("INSERT INTO commits (organization_id, project_id, sha, parents_complete) VALUES (?, ?, ?, 0) ON CONFLICT DO NOTHING")
+      .bind(organizationId, projectId, parent));
+    statements.push(env.DB.prepare(`
+      INSERT INTO commit_edges (organization_id, project_id, child_sha, parent_sha) VALUES (?, ?, ?, ?)
+      ON CONFLICT DO NOTHING
+    `).bind(organizationId, projectId, identity.commitSha, parent));
+  }
+  if (identity.graphComplete) {
+    statements.push(env.DB.prepare("UPDATE commits SET parents_complete = 1 WHERE organization_id = ? AND project_id = ? AND sha = ?")
+      .bind(organizationId, projectId, identity.commitSha));
+  }
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    if (String(error).includes("commit_graph_immutable")) throw new HttpError(409, "commit_graph_conflict", "Commit parent graph conflicts with an earlier complete observation");
+    throw error;
+  }
+}
+
+function isCommitSha(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{7,64}$/.test(value);
 }
 
 function validateEntry(entry: ScreenshotManifestEntry, index: number): ScreenshotManifestEntry {

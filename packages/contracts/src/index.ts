@@ -49,6 +49,8 @@ export interface RunIdentity {
   pullRequestNumber?: number;
   expectedShards: string[];
   trustClass: "first_party" | "fork_isolated";
+  parentShas: string[];
+  graphComplete: boolean;
 }
 
 export function isSha256(value: string): boolean {
@@ -62,4 +64,3 @@ export function normalizeScreenshotName(value: string): string {
   if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("Screenshot name contains an invalid path component");
   return parts.join("/");
 }
-
