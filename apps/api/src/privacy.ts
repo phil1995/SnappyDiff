@@ -9,7 +9,7 @@ const RECOVERY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 export async function exportOrganization(env: Env, session: Session): Promise<Response> {
   requirePermission(session, "projects:admin");
   const [organization, members, projects, runs, comparisons, decisions, auditEvents] = await Promise.all([
-    env.DB.prepare("SELECT id, external_id, slug, name, created_at, updated_at FROM organizations WHERE id = ?")
+    env.DB.prepare("SELECT id, workos_organization_id, slug, name, created_at, updated_at FROM organizations WHERE id = ?")
       .bind(session.organizationId).first(),
     env.DB.prepare(`SELECT u.email, u.display_name, m.role, m.status, m.created_at, m.updated_at
       FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = ? ORDER BY u.email LIMIT 10000`)
@@ -50,11 +50,15 @@ export async function scheduleOrganizationDeletion(
     throw new HttpError(400, "deletion_confirmation_required", "Confirm the exact organization ID before scheduling deletion");
   }
   const executeAfter = Math.floor(Date.now() / 1000) + RECOVERY_WINDOW_SECONDS;
-  await env.DB.prepare(`INSERT INTO organization_deletion_requests
+  const scheduled = await env.DB.prepare(`INSERT INTO organization_deletion_requests
     (organization_id, requested_by_user_id, execute_after) VALUES (?, ?, ?)
     ON CONFLICT (organization_id) DO UPDATE SET requested_by_user_id = excluded.requested_by_user_id,
-      execute_after = excluded.execute_after, state = 'pending', updated_at = unixepoch()`)
+      execute_after = excluded.execute_after, updated_at = unixepoch()
+    WHERE organization_deletion_requests.state = 'pending'`)
     .bind(session.organizationId, session.userId, executeAfter).run();
+  if (Number(scheduled.meta?.["changes"] ?? 0) !== 1) {
+    throw new HttpError(409, "deletion_already_started", "Organization deletion has already started and cannot be rescheduled");
+  }
   await recordAudit(env, { organizationId: session.organizationId, actorUserId: session.userId,
     action: "organization.deletion_scheduled", targetType: "organization", targetId: session.organizationId,
     requestId: context.requestId, metadata: { executeAfter } });
@@ -89,9 +93,11 @@ export async function processOrganizationDeletions(env: Env): Promise<void> {
     .all<{ organization_id: string; state: string; deleting_started_at: number | null }>();
   for (const deletion of due.results ?? []) {
     const organizationId = deletion.organization_id;
-    await env.DB.prepare(`UPDATE organization_deletion_requests SET state = 'deleting',
+    const claimed = await env.DB.prepare(`UPDATE organization_deletion_requests SET state = 'deleting',
       deleting_started_at = COALESCE(deleting_started_at, unixepoch()), updated_at = unixepoch()
-      WHERE organization_id = ? AND execute_after <= unixepoch()`).bind(organizationId).run();
+      WHERE organization_id = ? AND execute_after <= unixepoch()
+        AND (state = 'pending' OR state = 'deleting')`).bind(organizationId).run();
+    if (Number(claimed.meta?.["changes"] ?? 0) !== 1) continue;
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO organization_deletion_objects (organization_id, r2_key)
         SELECT organization_id, r2_key FROM images WHERE organization_id = ?

@@ -73,7 +73,10 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
       execution.waitUntil(drainJobs(env, 10));
       return response;
     }
-    if (uploadsMatch?.[1] && uploadsMatch[2] && request.method === "GET") return listShardUploads(env, principal, uploadsMatch[1], uploadsMatch[2], url.searchParams.get("after"));
+    if (uploadsMatch?.[1] && uploadsMatch[2] && request.method === "GET") {
+      await requireOrganizationWritable(env, principal.organizationId);
+      return listShardUploads(env, principal, uploadsMatch[1], uploadsMatch[2], url.searchParams.get("after"));
+    }
     if (completeUploadMatch?.[1] && request.method === "POST") {
       const response = await completeUpload(env, principal, completeUploadMatch[1]);
       execution.waitUntil(drainJobs(env, 10));
