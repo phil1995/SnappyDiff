@@ -1,0 +1,15 @@
+{
+  "name": "@snappydiff/contracts",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test src/**/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}
+

@@ -30,6 +30,13 @@ Local D1 and R2 emulation use Wrangler and do not require cloud credentials. See
 
 The local shape check reports provider secrets as disabled. Before staging or production deployment, run `npm run validate:config -- <environment-file> --require-secrets` in a protected environment or verify the equivalent Wrangler secret bindings without printing their values.
 
+Apply the local schema and optional development tenant with:
+
+```bash
+npx wrangler d1 migrations apply snappydiff-local --local --config apps/api/wrangler.jsonc
+npx wrangler d1 execute snappydiff-local --local --config apps/api/wrangler.jsonc --file apps/api/scripts/seed-local.sql
+```
+
 ## Delivery status
 
 Implementation follows the milestones in `PLAN.md`. External-provider validation remains an explicit release gate until disposable WorkOS, GitHub, and Cloudflare resources are supplied; see `docs/provider-validation.md`.

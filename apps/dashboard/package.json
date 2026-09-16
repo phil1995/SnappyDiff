@@ -1,0 +1,10 @@
+{
+  "name": "@snappydiff/dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check scripts/build.mjs"
+  }
+}
+
