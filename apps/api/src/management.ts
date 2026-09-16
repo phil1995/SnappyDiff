@@ -120,7 +120,10 @@ export async function controlBaseline(request: Request, env: Env, session: Sessi
     if (Number(results[0]?.meta?.["changes"] ?? 0) !== 1) throw new HttpError(409, "baseline_changed", "Baseline state changed; refresh and retry");
   } else {
     if (typeof body.runId !== "string") throw new HttpError(400, "run_required", "A completed baseline run is required");
-    const run = await env.DB.prepare("SELECT id, commit_sha FROM runs WHERE id = ? AND organization_id = ? AND project_id = ? AND suite_id = ? AND state = 'complete' AND trust_class = 'first_party'")
+    const run = await env.DB.prepare(`SELECT id, commit_sha FROM runs
+      WHERE id = ? AND organization_id = ? AND project_id = ? AND suite_id = ?
+        AND state = 'complete' AND trust_class = 'first_party' AND artifacts_expired_at IS NULL
+        AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL`)
       .bind(body.runId, session.organizationId, projectId, suite.id).first<{ id: string; commit_sha: string }>();
     if (!run) throw new HttpError(400, "invalid_baseline_run", "Run is not an eligible completed project run");
     if (action === "history_reset" && suite.known_default_head_sha !== run.commit_sha) {
@@ -132,24 +135,42 @@ export async function controlBaseline(request: Request, env: Env, session: Sessi
         INSERT INTO baselines (id, organization_id, suite_id, run_id, action, actor_user_id, previous_run_id, segment)
         SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
           SELECT 1 FROM suites WHERE id = ? AND organization_id = ? AND baseline_version = ?
+        ) AND EXISTS (
+          SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
+            AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
         )
       `).bind(baselineId, session.organizationId, suite.id, run.id, action, session.userId,
-        suite.active_baseline_run_id, suite.baseline_version + 1, suite.id, session.organizationId, suite.baseline_version),
+        suite.active_baseline_run_id, suite.baseline_version + 1, suite.id, session.organizationId,
+        suite.baseline_version, run.id, session.organizationId),
       env.DB.prepare("UPDATE retention_pins SET released_at = unixepoch() WHERE organization_id = ? AND owner_type = ? AND owner_id = ? AND released_at IS NULL AND EXISTS (SELECT 1 FROM baselines WHERE id = ?)")
         .bind(session.organizationId, action === "rollback" ? "rollback" : "active_baseline", suite.id, baselineId),
       env.DB.prepare(`
         INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id)
         SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM baselines WHERE id = ?)
-      `).bind(randomId("pin"), session.organizationId, action === "rollback" ? "rollback" : "active_baseline", suite.id, run.id, baselineId),
+          AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND organization_id = ?
+            AND artifacts_expired_at IS NULL AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL)
+      `).bind(randomId("pin"), session.organizationId, action === "rollback" ? "rollback" : "active_baseline",
+        suite.id, run.id, baselineId, run.id, session.organizationId),
     ];
     if (action === "rollback") {
-      statements.push(env.DB.prepare("UPDATE suites SET rollback_run_id = ?, baseline_version = baseline_version + 1, updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND baseline_version = ? AND EXISTS (SELECT 1 FROM baselines WHERE id = ?)")
-        .bind(run.id, suite.id, session.organizationId, suite.baseline_version, baselineId));
+      statements.push(env.DB.prepare(`UPDATE suites SET rollback_run_id = ?, baseline_version = baseline_version + 1, updated_at = unixepoch()
+        WHERE id = ? AND organization_id = ? AND baseline_version = ? AND EXISTS (SELECT 1 FROM baselines WHERE id = ?)
+          AND EXISTS (SELECT 1 FROM retention_pins WHERE organization_id = ? AND owner_type = 'rollback'
+            AND owner_id = ? AND run_id = ? AND released_at IS NULL)`)
+        .bind(run.id, suite.id, session.organizationId, suite.baseline_version, baselineId,
+          session.organizationId, suite.id, run.id));
     } else {
-      statements.push(env.DB.prepare("UPDATE suites SET active_baseline_run_id = ?, rollback_run_id = NULL, promotion_mode = 'automatic', baseline_version = baseline_version + 1, updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND baseline_version = ? AND EXISTS (SELECT 1 FROM baselines WHERE id = ?)")
-        .bind(run.id, suite.id, session.organizationId, suite.baseline_version, baselineId));
-      statements.push(env.DB.prepare("UPDATE retention_pins SET released_at = unixepoch() WHERE organization_id = ? AND owner_type = 'rollback' AND owner_id = ? AND released_at IS NULL")
-        .bind(session.organizationId, suite.id));
+      statements.push(env.DB.prepare(`UPDATE suites SET active_baseline_run_id = ?, rollback_run_id = NULL,
+        promotion_mode = 'automatic', baseline_version = baseline_version + 1, updated_at = unixepoch()
+        WHERE id = ? AND organization_id = ? AND baseline_version = ? AND EXISTS (SELECT 1 FROM baselines WHERE id = ?)
+          AND EXISTS (SELECT 1 FROM retention_pins WHERE organization_id = ? AND owner_type = 'active_baseline'
+            AND owner_id = ? AND run_id = ? AND released_at IS NULL)`)
+        .bind(run.id, suite.id, session.organizationId, suite.baseline_version, baselineId,
+          session.organizationId, suite.id, run.id));
+      statements.push(env.DB.prepare(`UPDATE retention_pins SET released_at = unixepoch()
+        WHERE organization_id = ? AND owner_type = 'rollback' AND owner_id = ? AND released_at IS NULL
+          AND EXISTS (SELECT 1 FROM baselines WHERE id = ?)`)
+        .bind(session.organizationId, suite.id, baselineId));
     }
     const results = await env.DB.batch(statements);
     if (Number(results[0]?.meta?.["changes"] ?? 0) !== 1) throw new HttpError(409, "baseline_changed", "Baseline state changed; refresh and retry");

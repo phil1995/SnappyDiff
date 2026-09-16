@@ -324,18 +324,41 @@ export async function handleGitHubWebhook(request: Request, env: Env): Promise<R
       const project = await env.DB.prepare("SELECT id FROM projects WHERE organization_id = ? AND repository_owner = ? AND repository_name = ?")
         .bind(mapping.organization_id, String(payload["repository"].owner?.login), String(payload["repository"].name)).first<{ id: string }>();
       if (!project) continue;
-      const updated = await env.DB.prepare(`
+      const ownerId = `${project.id}:pr:${pullNumber}`;
+      await env.DB.batch([env.DB.prepare(`
         INSERT INTO pull_requests (organization_id, project_id, number, state, head_sha, base_sha, installation_id, github_updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, project_id, number) DO UPDATE SET
           state = excluded.state, head_sha = excluded.head_sha, base_sha = excluded.base_sha,
-          installation_id = excluded.installation_id, github_updated_at = excluded.github_updated_at, updated_at = unixepoch()
+          installation_id = excluded.installation_id, github_updated_at = excluded.github_updated_at,
+          state_version = pull_requests.state_version + 1, updated_at = unixepoch()
         WHERE excluded.github_updated_at >= pull_requests.github_updated_at
       `).bind(mapping.organization_id, project.id, pullNumber, currentPull.state,
-        currentPull.headSha, currentPull.baseSha, installationId, currentPull.updatedAt).run();
-      if (currentPull.state === "closed" && Number(updated.meta?.["changes"] ?? 0) === 1) {
-        await env.DB.prepare("UPDATE retention_pins SET released_at = unixepoch() WHERE organization_id = ? AND owner_type = 'open_pull_request' AND owner_id = ? AND released_at IS NULL")
-          .bind(mapping.organization_id, `${project.id}:pr:${pullNumber}`).run();
-      }
+        currentPull.headSha, currentPull.baseSha, installationId, currentPull.updatedAt),
+      env.DB.prepare(`UPDATE retention_pins SET released_at = unixepoch()
+        WHERE organization_id = ? AND owner_type = 'open_pull_request' AND owner_id = ? AND released_at IS NULL
+          AND EXISTS (SELECT 1 FROM pull_requests WHERE organization_id = ? AND project_id = ? AND number = ?
+            AND state = 'closed' AND head_sha = ? AND github_updated_at = ?)`)
+        .bind(mapping.organization_id, ownerId, mapping.organization_id, project.id, pullNumber,
+          currentPull.headSha, currentPull.updatedAt),
+      env.DB.prepare(`
+        INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id, comparison_id)
+        SELECT 'pin_' || lower(hex(randomblob(16))), ?, 'open_pull_request', ?, candidates.run_id, candidates.comparison_id
+          FROM (SELECT current_run_id AS run_id, id AS comparison_id FROM comparisons
+                 WHERE organization_id = ? AND project_id = ?
+                   AND current_run_id IN (SELECT id FROM runs WHERE organization_id = ? AND project_id = ? AND pull_request_number = ?)
+                UNION SELECT baseline_run_id, id FROM comparisons
+                 WHERE organization_id = ? AND project_id = ? AND baseline_run_id IS NOT NULL
+                   AND current_run_id IN (SELECT id FROM runs WHERE organization_id = ? AND project_id = ? AND pull_request_number = ?)) candidates
+          JOIN runs r ON r.id = candidates.run_id AND r.organization_id = ?
+         WHERE r.artifacts_expired_at IS NULL AND r.artifact_expiry_owner IS NULL AND r.metadata_deletion_owner IS NULL
+           AND EXISTS (SELECT 1 FROM pull_requests WHERE organization_id = ? AND project_id = ? AND number = ?
+             AND state = 'open' AND head_sha = ? AND github_updated_at = ?)
+        ON CONFLICT DO UPDATE SET released_at = NULL
+      `).bind(mapping.organization_id, ownerId, mapping.organization_id, project.id,
+        mapping.organization_id, project.id, pullNumber, mapping.organization_id, project.id,
+        mapping.organization_id, project.id, pullNumber, mapping.organization_id,
+        mapping.organization_id, project.id, pullNumber, currentPull.headSha, currentPull.updatedAt),
+      ]);
     }
   }
   if (eventName === "installation_repositories" && payload["installation"]?.id) {

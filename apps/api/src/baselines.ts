@@ -32,6 +32,7 @@ export async function processBaselineJob(env: Env, job: PendingJob): Promise<voi
       p.default_branch, p.repository_owner, p.repository_name, r.completed_at
       FROM runs r JOIN projects p ON p.id = r.project_id AND p.organization_id = r.organization_id
      WHERE r.id = ? AND r.organization_id = ? AND r.state = 'complete'
+       AND r.artifacts_expired_at IS NULL AND r.artifact_expiry_owner IS NULL AND r.metadata_deletion_owner IS NULL
   `).bind(runId, job.organization_id).first<RunRecord>();
   if (!run) return;
   const suite = await env.DB.prepare("SELECT active_baseline_run_id, rollback_run_id, promotion_mode FROM suites WHERE id = ? AND organization_id = ?")
@@ -62,6 +63,7 @@ async function selectBaseline(
     SELECT cr.run_id FROM commit_runs cr JOIN runs r
       ON r.id = cr.run_id AND r.organization_id = cr.organization_id AND r.state = 'complete'
      WHERE cr.organization_id = ? AND cr.suite_id = ? AND cr.commit_sha = ?
+       AND r.artifacts_expired_at IS NULL AND r.artifact_expiry_owner IS NULL AND r.metadata_deletion_owner IS NULL
   `).bind(run.organization_id, run.suite_id, run.merge_base_sha).first<{ run_id: string }>();
   if (exact) return { runId: exact.run_id, distance: 0, warning: null, error: null };
   const graph = await env.DB.prepare("SELECT parents_complete FROM commits WHERE organization_id = ? AND project_id = ? AND sha = ?")
@@ -82,6 +84,7 @@ async function selectBaseline(
     SELECT cr.run_id, a.distance FROM ancestors a JOIN commit_runs cr
       ON cr.organization_id = ? AND cr.suite_id = ? AND cr.commit_sha = a.sha
       JOIN runs r ON r.id = cr.run_id AND r.organization_id = cr.organization_id AND r.state = 'complete'
+       AND r.artifacts_expired_at IS NULL AND r.artifact_expiry_owner IS NULL AND r.metadata_deletion_owner IS NULL
      ORDER BY a.distance, a.sha LIMIT 1
   `).bind(run.merge_base_sha, run.merge_base_sha, run.organization_id, run.project_id, run.organization_id, run.suite_id)
     .first<{ run_id: string; distance: number }>();
@@ -188,15 +191,23 @@ async function createComparison(
     const checkScope = `pr:${run.pull_request_number}`;
     statements.push(env.DB.prepare(`
       INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id, comparison_id)
-      VALUES (?, ?, 'open_pull_request', ?, ?, ?)
+      SELECT ?, ?, 'open_pull_request', ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
+          AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
+      ) AND EXISTS (SELECT 1 FROM comparisons WHERE id = ? AND organization_id = ?)
       ON CONFLICT (organization_id, owner_type, owner_id, run_id, comparison_id) DO NOTHING
-    `).bind(randomId("pin"), run.organization_id, retentionOwner, run.id, comparisonId));
+    `).bind(randomId("pin"), run.organization_id, retentionOwner, run.id, comparisonId,
+      run.id, run.organization_id, comparisonId, run.organization_id));
     if (baselineRunId) {
       statements.push(env.DB.prepare(`
         INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id, comparison_id)
-        VALUES (?, ?, 'open_pull_request', ?, ?, ?)
+        SELECT ?, ?, 'open_pull_request', ?, ?, ? WHERE EXISTS (
+          SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
+            AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
+        ) AND EXISTS (SELECT 1 FROM comparisons WHERE id = ? AND organization_id = ?)
         ON CONFLICT (organization_id, owner_type, owner_id, run_id, comparison_id) DO NOTHING
-      `).bind(randomId("pin"), run.organization_id, retentionOwner, baselineRunId, comparisonId));
+      `).bind(randomId("pin"), run.organization_id, retentionOwner, baselineRunId, comparisonId,
+        baselineRunId, run.organization_id, comparisonId, run.organization_id));
     }
     const installation = await env.DB.prepare(`
       SELECT installation_id FROM github_installations WHERE organization_id = ?
@@ -286,9 +297,12 @@ async function promoteDefaultRun(env: Env, run: RunRecord): Promise<void> {
         SELECT 1 FROM suites WHERE id = ? AND organization_id = ?
           AND ${activeRunId ? "active_baseline_run_id = ?" : "active_baseline_run_id IS NULL"}
           AND promotion_mode = 'automatic'
+      ) AND EXISTS (
+        SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
+          AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
       )
     `).bind(baselineId, run.organization_id, run.suite_id, run.id, action, activeRunId,
-      run.suite_id, run.organization_id, ...(activeRunId ? [activeRunId] : [])),
+      run.suite_id, run.organization_id, ...(activeRunId ? [activeRunId] : []), run.id, run.organization_id),
     env.DB.prepare(`
       UPDATE retention_pins SET released_at = unixepoch()
        WHERE organization_id = ? AND owner_type = 'active_baseline' AND owner_id = ? AND released_at IS NULL
@@ -297,13 +311,18 @@ async function promoteDefaultRun(env: Env, run: RunRecord): Promise<void> {
     env.DB.prepare(`
       INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id)
       SELECT ?, ?, 'active_baseline', ?, ? WHERE EXISTS (SELECT 1 FROM baselines WHERE id = ?)
-    `).bind(randomId("pin"), run.organization_id, run.suite_id, run.id, baselineId),
+        AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND organization_id = ?
+          AND artifacts_expired_at IS NULL AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL)
+    `).bind(randomId("pin"), run.organization_id, run.suite_id, run.id, baselineId, run.id, run.organization_id),
     env.DB.prepare(`
       UPDATE suites SET active_baseline_run_id = ?, baseline_version = baseline_version + 1,
         known_default_head_sha = ?, updated_at = unixepoch()
        WHERE id = ? AND organization_id = ? AND promotion_mode = 'automatic'
          AND ${activeRunId ? "active_baseline_run_id = ?" : "active_baseline_run_id IS NULL"}
-    `).bind(run.id, run.observed_default_head_sha ?? run.commit_sha, run.suite_id, run.organization_id, ...(activeRunId ? [activeRunId] : [])),
+         AND EXISTS (SELECT 1 FROM retention_pins WHERE organization_id = ? AND owner_type = 'active_baseline'
+           AND owner_id = ? AND run_id = ? AND released_at IS NULL)
+    `).bind(run.id, run.observed_default_head_sha ?? run.commit_sha, run.suite_id, run.organization_id,
+      ...(activeRunId ? [activeRunId] : []), run.organization_id, run.suite_id, run.id),
   ]);
   const promoted = await env.DB.prepare("SELECT 1 AS promoted FROM suites WHERE id = ? AND organization_id = ? AND active_baseline_run_id = ?")
     .bind(run.suite_id, run.organization_id, run.id).first();

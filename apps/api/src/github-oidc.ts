@@ -122,7 +122,8 @@ export async function exchangeGitHubOidc(request: Request, env: Env): Promise<Re
       INSERT INTO pull_requests (organization_id, project_id, number, state, head_sha, base_sha, installation_id, github_updated_at)
       VALUES (?, ?, ?, 'open', ?, ?, ?, ?) ON CONFLICT (organization_id, project_id, number) DO UPDATE SET
         state = 'open', head_sha = excluded.head_sha, base_sha = excluded.base_sha,
-        installation_id = excluded.installation_id, github_updated_at = excluded.github_updated_at, updated_at = unixepoch()
+        installation_id = excluded.installation_id, github_updated_at = excluded.github_updated_at,
+        state_version = pull_requests.state_version + 1, updated_at = unixepoch()
       WHERE excluded.github_updated_at >= pull_requests.github_updated_at
     `).bind(project.organization_id, project.id, pullRequestNumber, pull.headSha, pull.baseSha,
       installation.installation_id, pull.updatedAt).run();

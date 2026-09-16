@@ -26,6 +26,7 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
   if (!upload || upload.state === "failed" || upload.state === "expired") return;
   if (upload.object_version !== payload.objectVersion) return;
   if (upload.state === "published") {
+    await ensureCanonicalObject(env, upload, payload.objectVersion);
     await ensureShardCompletionOutbox(env, upload);
     return;
   }
@@ -70,13 +71,12 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
       UPDATE organization_usage SET
         stored_bytes = stored_bytes + CASE WHEN NOT EXISTS (
           SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ?
-        ) THEN ? ELSE 0 END,
-        reserved_upload_bytes = reserved_upload_bytes - ?, updated_at = unixepoch()
+        ) THEN ? ELSE 0 END, updated_at = unixepoch()
        WHERE organization_id = ? AND EXISTS (
          SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
            AND state = 'verifying' AND object_version = ?
        )
-    `).bind(upload.organization_id, actualHash, upload.expected_bytes, upload.reserved_bytes,
+    `).bind(upload.organization_id, actualHash, upload.expected_bytes,
       upload.organization_id, upload.id, upload.organization_id, payload.objectVersion),
     env.DB.prepare(`
       INSERT INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
@@ -98,14 +98,53 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
     env.DB.prepare(`
       UPDATE upload_sessions SET state = 'published', updated_at = unixepoch()
        WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?
-    `).bind(upload.id, upload.organization_id, payload.objectVersion),
+         AND NOT EXISTS (SELECT 1 FROM manifest_entries WHERE organization_id = ? AND run_id = ?
+           AND shard_id = ? AND sha256 = ? AND image_id IS NULL)
+    `).bind(upload.id, upload.organization_id, payload.objectVersion, upload.organization_id,
+      upload.run_id, upload.shard_id, actualHash),
     env.DB.prepare(`
-      UPDATE run_shards SET state = 'verified', updated_at = unixepoch()
-       WHERE id = ? AND organization_id = ? AND state = 'verifying'
-         AND NOT EXISTS (SELECT 1 FROM manifest_entries WHERE organization_id = ? AND run_id = ? AND shard_id = ? AND image_id IS NULL)
-    `).bind(upload.shard_id, upload.organization_id, upload.organization_id, upload.run_id, upload.shard_id),
-    completionJobStatement(env, upload),
+      UPDATE organization_usage SET reserved_upload_bytes = reserved_upload_bytes - ?, updated_at = unixepoch()
+       WHERE organization_id = ? AND EXISTS (SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
+         AND state = 'published' AND object_version = ?)
+    `).bind(upload.reserved_bytes, upload.organization_id, upload.id, upload.organization_id, payload.objectVersion),
   ]);
+  const published = await env.DB.prepare(`SELECT 1 AS found FROM upload_sessions
+    WHERE id = ? AND organization_id = ? AND state = 'published' AND object_version = ?`)
+    .bind(upload.id, upload.organization_id, payload.objectVersion).first();
+  if (!published) throw new Error("Canonical image publication was contended; verification will retry");
+  await ensureCanonicalObject(env, upload, payload.objectVersion, bytes);
+  await ensureShardCompletionOutbox(env, upload);
+}
+
+async function ensureCanonicalObject(
+  env: Env,
+  upload: { organization_id: string; run_id: string; shard_id: string; expected_sha256: string;
+    expected_bytes: number; temporary_key: string },
+  objectVersion: string,
+  verifiedBytes?: ArrayBuffer,
+): Promise<void> {
+  const image = await env.DB.prepare(`
+    SELECT i.r2_key FROM images i JOIN manifest_entries m
+      ON m.organization_id = i.organization_id AND m.image_id = i.id
+     WHERE m.organization_id = ? AND m.run_id = ? AND m.shard_id = ? AND m.sha256 = ?
+       AND i.reference_state = 'active' LIMIT 1
+  `).bind(upload.organization_id, upload.run_id, upload.shard_id, upload.expected_sha256)
+    .first<{ r2_key: string }>();
+  if (!image) throw new Error("Published upload is not attached to an active canonical image");
+  if (await env.IMAGES.head(image.r2_key)) return;
+  let bytes = verifiedBytes;
+  if (!bytes) {
+    const temporary = await env.IMAGES.get(upload.temporary_key);
+    if (!temporary || temporary.version !== objectVersion || temporary.size !== upload.expected_bytes) {
+      throw new Error("Canonical image is missing and the verified temporary object is unavailable");
+    }
+    bytes = await temporary.arrayBuffer();
+    if (await sha256(bytes) !== upload.expected_sha256) throw new Error("Temporary object changed after verification");
+  }
+  await env.IMAGES.put(image.r2_key, bytes, {
+    httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: upload.expected_sha256 },
+    onlyIf: { etagDoesNotMatch: "*" },
+  });
 }
 
 function completionJobStatement(
