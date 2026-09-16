@@ -61,11 +61,6 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
 
   const imageId = randomId("img");
   const canonicalKey = `org/${upload.organization_id}/sha256/${actualHash.slice(0, 2)}/${actualHash}-${imageId}.png`;
-  await env.IMAGES.put(canonicalKey, bytes, {
-    httpMetadata: { contentType: "image/png" },
-    customMetadata: { sha256: actualHash },
-    onlyIf: { etagDoesNotMatch: "*" },
-  });
   await env.DB.batch([
     env.DB.prepare(`
       UPDATE organization_usage SET
@@ -115,8 +110,7 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
     WHERE id = ? AND organization_id = ? AND state = 'published' AND object_version = ?`)
     .bind(upload.id, upload.organization_id, payload.objectVersion).first();
   if (!published) throw new Error("Canonical image publication was contended; verification will retry");
-  const activeKey = await ensureCanonicalObject(env, upload, payload.objectVersion, bytes);
-  if (activeKey !== canonicalKey) await env.IMAGES.delete(canonicalKey);
+  await ensureCanonicalObject(env, upload, payload.objectVersion, bytes);
   await ensureShardCompletionOutbox(env, upload);
 }
 
