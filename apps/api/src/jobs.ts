@@ -117,14 +117,18 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
              SELECT SUM(reserved_bytes) FROM upload_sessions
               WHERE upload_sessions.organization_id = organization_usage.organization_id
                 AND state IN ('pending', 'uploaded', 'verifying') AND expires_at < unixepoch()
+                AND reservation_released_at IS NULL
            ), 0)), updated_at = unixepoch()
          WHERE EXISTS (
            SELECT 1 FROM upload_sessions
             WHERE upload_sessions.organization_id = organization_usage.organization_id
               AND state IN ('pending', 'uploaded', 'verifying') AND expires_at < unixepoch()
+              AND reservation_released_at IS NULL
          )
       `),
-      env.DB.prepare("UPDATE upload_sessions SET state = 'expired', updated_at = unixepoch() WHERE state IN ('pending', 'uploaded', 'verifying') AND expires_at < unixepoch()"),
+      env.DB.prepare(`UPDATE upload_sessions SET state = 'expired', reservation_released_at = unixepoch(), updated_at = unixepoch()
+        WHERE state IN ('pending', 'uploaded', 'verifying') AND expires_at < unixepoch()
+          AND reservation_released_at IS NULL`),
     ]);
     const rows = removable.results ?? [];
     if (rows.length > 0) {

@@ -39,11 +39,16 @@ export async function processBaselineJob(env: Env, job: PendingJob): Promise<voi
     .bind(run.suite_id, run.organization_id).first<{ active_baseline_run_id: string | null; rollback_run_id: string | null; promotion_mode: string }>();
   if (!suite) throw new Error("Default suite is missing");
   const isDefaultBranch = run.pull_request_number === null && run.branch === run.default_branch && run.trust_class === "first_party";
-  const existing = await env.DB.prepare("SELECT id FROM comparisons WHERE organization_id = ? AND current_run_id = ?")
-    .bind(run.organization_id, run.id).first();
+  const existing = await env.DB.prepare(`SELECT id, baseline_run_id, baseline_distance, baseline_warning, selection_error, status
+    FROM comparisons WHERE organization_id = ? AND current_run_id = ?`)
+    .bind(run.organization_id, run.id).first<{ id: string; baseline_run_id: string | null; baseline_distance: number | null;
+      baseline_warning: string | null; selection_error: string | null; status: string }>();
   if (!existing) {
     const selection = await selectBaseline(env, run, suite.rollback_run_id, isDefaultBranch ? suite.active_baseline_run_id : null);
     await createComparison(env, run, selection.runId, selection.distance, selection.warning, selection.error, isDefaultBranch);
+  } else if (existing.status === "pending") {
+    await finalizeComparison(env, run, existing.id, existing.baseline_run_id, existing.baseline_distance,
+      existing.baseline_warning, existing.selection_error, isDefaultBranch);
   }
   if (isDefaultBranch && suite.promotion_mode === "automatic") await promoteDefaultRun(env, run);
 }
@@ -125,6 +130,51 @@ async function createComparison(
   isDefaultBranch: boolean,
 ): Promise<void> {
   const comparisonId = randomId("cmp");
+  const buildOwner = `build:${comparisonId}`;
+  const reserved = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO comparisons
+        (id, organization_id, project_id, suite_id, baseline_run_id, current_run_id, status,
+         baseline_warning, baseline_distance, selection_error)
+      SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
+          AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
+      ) AND (? IS NULL OR EXISTS (
+        SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
+          AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
+      ))
+    `).bind(comparisonId, run.organization_id, run.project_id, run.suite_id, baselineRunId, run.id,
+      warning, distance, selectionError, run.id, run.organization_id, baselineRunId,
+      baselineRunId, run.organization_id),
+    env.DB.prepare(`
+      INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id, comparison_id)
+      SELECT ?, ?, 'open_pull_request', ?, ?, ? WHERE EXISTS (
+        SELECT 1 FROM comparisons WHERE id = ? AND organization_id = ?)
+    `).bind(randomId("pin"), run.organization_id, buildOwner, run.id, comparisonId,
+      comparisonId, run.organization_id),
+    env.DB.prepare(`
+      INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id, comparison_id)
+      SELECT ?, ?, 'open_pull_request', ?, ?, ? WHERE ? IS NOT NULL AND EXISTS (
+        SELECT 1 FROM comparisons WHERE id = ? AND organization_id = ?)
+    `).bind(randomId("pin"), run.organization_id, buildOwner, baselineRunId, comparisonId, baselineRunId,
+      comparisonId, run.organization_id),
+  ]);
+  if (Number(reserved[0]?.meta?.["changes"] ?? 0) !== 1) {
+    throw new Error("Comparison artifacts are being expired; baseline selection will retry");
+  }
+  await finalizeComparison(env, run, comparisonId, baselineRunId, distance, warning, selectionError, isDefaultBranch);
+}
+
+async function finalizeComparison(
+  env: Env,
+  run: RunRecord,
+  comparisonId: string,
+  baselineRunId: string | null,
+  distance: number | null,
+  warning: string | null,
+  selectionError: string | null,
+  isDefaultBranch: boolean,
+): Promise<void> {
   const counts = baselineRunId
     ? await env.DB.prepare(`
         SELECT
@@ -153,21 +203,13 @@ async function createComparison(
   if (selectionError) { added = 0; removed = 0; changed = 0; }
   const hasChanges = added + removed + changed > 0;
   const status = selectionError ? "error" : isDefaultBranch || !hasChanges ? "passed" : "action_required";
-  const statements: D1PreparedStatement[] = [
-    env.DB.prepare(`
-      INSERT INTO comparisons
-        (id, organization_id, project_id, suite_id, baseline_run_id, current_run_id, added_count,
-         removed_count, changed_count, unchanged_count, status, baseline_warning, baseline_distance)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(comparisonId, run.organization_id, run.project_id, run.suite_id, baselineRunId, run.id,
-      added, removed, changed, unchanged, status, selectionError ?? warning, distance),
-  ];
+  const statements: D1PreparedStatement[] = [];
   if (!selectionError) statements.push(env.DB.prepare(`
       INSERT INTO comparison_entries (organization_id, comparison_id, name, kind, current_image_id)
       SELECT ?, ?, c.name, 'added', c.image_id FROM screenshots c
        WHERE c.organization_id = ? AND c.run_id = ? AND NOT EXISTS (
          SELECT 1 FROM screenshots b WHERE b.organization_id = ? AND b.run_id = ? AND b.name = c.name
-       )
+       ) ON CONFLICT (organization_id, comparison_id, name) DO NOTHING
     `).bind(run.organization_id, comparisonId, run.organization_id, run.id, run.organization_id, baselineRunId ?? ""));
   if (baselineRunId && !selectionError) {
     statements.push(
@@ -176,13 +218,15 @@ async function createComparison(
         SELECT ?, ?, b.name, 'removed', b.image_id FROM screenshots b
          WHERE b.organization_id = ? AND b.run_id = ? AND NOT EXISTS (
            SELECT 1 FROM screenshots c WHERE c.organization_id = ? AND c.run_id = ? AND c.name = b.name
-         )
+         ) ON CONFLICT (organization_id, comparison_id, name) DO NOTHING
       `).bind(run.organization_id, comparisonId, run.organization_id, baselineRunId, run.organization_id, run.id),
       env.DB.prepare(`
         INSERT INTO comparison_entries (organization_id, comparison_id, name, kind, baseline_image_id, current_image_id)
         SELECT ?, ?, c.name, CASE WHEN c.image_id = b.image_id THEN 'unchanged' ELSE 'changed' END, b.image_id, c.image_id
           FROM screenshots c JOIN screenshots b ON b.organization_id = c.organization_id AND b.name = c.name
          WHERE c.organization_id = ? AND c.run_id = ? AND b.run_id = ?
+        ON CONFLICT (organization_id, comparison_id, name) DO UPDATE SET
+          kind = excluded.kind, baseline_image_id = excluded.baseline_image_id, current_image_id = excluded.current_image_id
       `).bind(run.organization_id, comparisonId, run.organization_id, run.id, baselineRunId),
     );
   }
@@ -195,9 +239,12 @@ async function createComparison(
         SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
           AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
       ) AND EXISTS (SELECT 1 FROM comparisons WHERE id = ? AND organization_id = ?)
-      ON CONFLICT (organization_id, owner_type, owner_id, run_id, comparison_id) DO NOTHING
+        AND EXISTS (SELECT 1 FROM pull_requests WHERE organization_id = ? AND project_id = ? AND number = ?
+          AND state IN ('open', 'unknown'))
+      ON CONFLICT (organization_id, owner_type, owner_id, run_id, comparison_id) DO UPDATE SET released_at = NULL
     `).bind(randomId("pin"), run.organization_id, retentionOwner, run.id, comparisonId,
-      run.id, run.organization_id, comparisonId, run.organization_id));
+      run.id, run.organization_id, comparisonId, run.organization_id,
+      run.organization_id, run.project_id, run.pull_request_number));
     if (baselineRunId) {
       statements.push(env.DB.prepare(`
         INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id, comparison_id)
@@ -205,9 +252,12 @@ async function createComparison(
           SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
             AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
         ) AND EXISTS (SELECT 1 FROM comparisons WHERE id = ? AND organization_id = ?)
-        ON CONFLICT (organization_id, owner_type, owner_id, run_id, comparison_id) DO NOTHING
+          AND EXISTS (SELECT 1 FROM pull_requests WHERE organization_id = ? AND project_id = ? AND number = ?
+            AND state IN ('open', 'unknown'))
+        ON CONFLICT (organization_id, owner_type, owner_id, run_id, comparison_id) DO UPDATE SET released_at = NULL
       `).bind(randomId("pin"), run.organization_id, retentionOwner, baselineRunId, comparisonId,
-        baselineRunId, run.organization_id, comparisonId, run.organization_id));
+        baselineRunId, run.organization_id, comparisonId, run.organization_id,
+        run.organization_id, run.project_id, run.pull_request_number));
     }
     const installation = await env.DB.prepare(`
       SELECT installation_id FROM github_installations WHERE organization_id = ?
@@ -221,6 +271,16 @@ async function createComparison(
       addGitHubCheckStatements(statements, env, run, comparisonId, installation.installation_id, checkScope, existingCheck ?? undefined);
     }
   }
+  statements.push(
+    env.DB.prepare(`UPDATE comparisons SET added_count = ?, removed_count = ?, changed_count = ?, unchanged_count = ?,
+      status = ?, baseline_warning = ?, baseline_distance = ?, selection_error = ?
+      WHERE id = ? AND organization_id = ? AND status = 'pending'`)
+      .bind(added, removed, changed, unchanged, status, selectionError ?? warning, distance, selectionError,
+        comparisonId, run.organization_id),
+    env.DB.prepare(`UPDATE retention_pins SET released_at = unixepoch()
+      WHERE organization_id = ? AND owner_type = 'open_pull_request' AND owner_id = ? AND released_at IS NULL`)
+      .bind(run.organization_id, `build:${comparisonId}`),
+  );
   await env.DB.batch(statements);
 }
 

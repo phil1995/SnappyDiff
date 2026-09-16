@@ -94,10 +94,13 @@ export async function controlBaseline(request: Request, env: Env, session: Sessi
         INSERT INTO baselines (id, organization_id, suite_id, run_id, action, actor_user_id, previous_run_id, segment)
         SELECT ?, ?, ?, active_baseline_run_id, 'resume', ?, active_baseline_run_id, ? FROM suites
          WHERE id = ? AND organization_id = ? AND baseline_version = ? AND active_baseline_run_id IS NOT NULL
+           AND known_default_head_sha IS ?
       `).bind(baselineId, session.organizationId, suite.id, session.userId, suite.baseline_version + 1,
-        suite.id, session.organizationId, suite.baseline_version),
-      env.DB.prepare("UPDATE suites SET promotion_mode = 'automatic', rollback_run_id = NULL, baseline_version = baseline_version + 1, updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND baseline_version = ?")
-        .bind(suite.id, session.organizationId, suite.baseline_version),
+        suite.id, session.organizationId, suite.baseline_version, suite.known_default_head_sha),
+      env.DB.prepare(`UPDATE suites SET promotion_mode = 'automatic', rollback_run_id = NULL,
+        baseline_version = baseline_version + 1, updated_at = unixepoch()
+        WHERE id = ? AND organization_id = ? AND baseline_version = ? AND known_default_head_sha IS ?`)
+        .bind(suite.id, session.organizationId, suite.baseline_version, suite.known_default_head_sha),
       env.DB.prepare(`
         UPDATE retention_pins SET released_at = unixepoch()
          WHERE organization_id = ? AND owner_type = 'rollback' AND owner_id = ? AND released_at IS NULL
@@ -135,13 +138,14 @@ export async function controlBaseline(request: Request, env: Env, session: Sessi
         INSERT INTO baselines (id, organization_id, suite_id, run_id, action, actor_user_id, previous_run_id, segment)
         SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
           SELECT 1 FROM suites WHERE id = ? AND organization_id = ? AND baseline_version = ?
+            AND (? != 'history_reset' OR known_default_head_sha = ?)
         ) AND EXISTS (
           SELECT 1 FROM runs WHERE id = ? AND organization_id = ? AND artifacts_expired_at IS NULL
             AND artifact_expiry_owner IS NULL AND metadata_deletion_owner IS NULL
         )
       `).bind(baselineId, session.organizationId, suite.id, run.id, action, session.userId,
         suite.active_baseline_run_id, suite.baseline_version + 1, suite.id, session.organizationId,
-        suite.baseline_version, run.id, session.organizationId),
+        suite.baseline_version, action, run.commit_sha, run.id, session.organizationId),
       env.DB.prepare("UPDATE retention_pins SET released_at = unixepoch() WHERE organization_id = ? AND owner_type = ? AND owner_id = ? AND released_at IS NULL AND EXISTS (SELECT 1 FROM baselines WHERE id = ?)")
         .bind(session.organizationId, action === "rollback" ? "rollback" : "active_baseline", suite.id, baselineId),
       env.DB.prepare(`

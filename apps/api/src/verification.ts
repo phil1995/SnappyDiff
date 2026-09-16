@@ -59,13 +59,13 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
     .bind(upload.organization_id, actualHash).first();
   if (deleting) throw new Error("Canonical image deletion is in progress; verification will retry");
 
-  const canonicalKey = `org/${upload.organization_id}/sha256/${actualHash.slice(0, 2)}/${actualHash}.png`;
+  const imageId = randomId("img");
+  const canonicalKey = `org/${upload.organization_id}/sha256/${actualHash.slice(0, 2)}/${actualHash}-${imageId}.png`;
   await env.IMAGES.put(canonicalKey, bytes, {
     httpMetadata: { contentType: "image/png" },
     customMetadata: { sha256: actualHash },
     onlyIf: { etagDoesNotMatch: "*" },
   });
-  const imageId = `img_${(await sha256(`${upload.organization_id}:${actualHash}`)).slice(0, 32)}`;
   await env.DB.batch([
     env.DB.prepare(`
       UPDATE organization_usage SET
@@ -105,14 +105,18 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
     env.DB.prepare(`
       UPDATE organization_usage SET reserved_upload_bytes = reserved_upload_bytes - ?, updated_at = unixepoch()
        WHERE organization_id = ? AND EXISTS (SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
-         AND state = 'published' AND object_version = ?)
+         AND state = 'published' AND object_version = ? AND reservation_released_at IS NULL)
     `).bind(upload.reserved_bytes, upload.organization_id, upload.id, upload.organization_id, payload.objectVersion),
+    env.DB.prepare(`UPDATE upload_sessions SET reservation_released_at = unixepoch(), updated_at = unixepoch()
+      WHERE id = ? AND organization_id = ? AND state = 'published' AND object_version = ?
+        AND reservation_released_at IS NULL`).bind(upload.id, upload.organization_id, payload.objectVersion),
   ]);
   const published = await env.DB.prepare(`SELECT 1 AS found FROM upload_sessions
     WHERE id = ? AND organization_id = ? AND state = 'published' AND object_version = ?`)
     .bind(upload.id, upload.organization_id, payload.objectVersion).first();
   if (!published) throw new Error("Canonical image publication was contended; verification will retry");
-  await ensureCanonicalObject(env, upload, payload.objectVersion, bytes);
+  const activeKey = await ensureCanonicalObject(env, upload, payload.objectVersion, bytes);
+  if (activeKey !== canonicalKey) await env.IMAGES.delete(canonicalKey);
   await ensureShardCompletionOutbox(env, upload);
 }
 
@@ -122,7 +126,7 @@ async function ensureCanonicalObject(
     expected_bytes: number; temporary_key: string },
   objectVersion: string,
   verifiedBytes?: ArrayBuffer,
-): Promise<void> {
+): Promise<string> {
   const image = await env.DB.prepare(`
     SELECT i.r2_key FROM images i JOIN manifest_entries m
       ON m.organization_id = i.organization_id AND m.image_id = i.id
@@ -131,7 +135,7 @@ async function ensureCanonicalObject(
   `).bind(upload.organization_id, upload.run_id, upload.shard_id, upload.expected_sha256)
     .first<{ r2_key: string }>();
   if (!image) throw new Error("Published upload is not attached to an active canonical image");
-  if (await env.IMAGES.head(image.r2_key)) return;
+  if (await env.IMAGES.head(image.r2_key)) return image.r2_key;
   let bytes = verifiedBytes;
   if (!bytes) {
     const temporary = await env.IMAGES.get(upload.temporary_key);
@@ -145,6 +149,7 @@ async function ensureCanonicalObject(
     httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: upload.expected_sha256 },
     onlyIf: { etagDoesNotMatch: "*" },
   });
+  return image.r2_key;
 }
 
 function completionJobStatement(
@@ -184,7 +189,8 @@ async function failUpload(
     env.DB.prepare(`
       UPDATE organization_usage SET reserved_upload_bytes = reserved_upload_bytes - ?, updated_at = unixepoch()
        WHERE organization_id = ? AND EXISTS (SELECT 1 FROM upload_sessions
-         WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?)
+         WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?
+           AND reservation_released_at IS NULL)
     `).bind(upload.reserved_bytes, upload.organization_id, upload.id, upload.organization_id, objectVersion),
     env.DB.prepare(`
       UPDATE run_shards SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ?
@@ -196,6 +202,9 @@ async function failUpload(
     `).bind(upload.run_id, upload.organization_id, upload.id, upload.organization_id, objectVersion),
     env.DB.prepare("UPDATE upload_sessions SET state = 'failed', updated_at = unixepoch() WHERE id = ? AND organization_id = ? AND state = 'verifying' AND object_version = ?")
       .bind(upload.id, upload.organization_id, objectVersion),
+    env.DB.prepare(`UPDATE upload_sessions SET reservation_released_at = unixepoch(), updated_at = unixepoch()
+      WHERE id = ? AND organization_id = ? AND state = 'failed' AND object_version = ?
+        AND reservation_released_at IS NULL`).bind(upload.id, upload.organization_id, objectVersion),
   ]);
   console.warn(JSON.stringify({ level: "warn", event: "upload_verification_failed", uploadId: upload.id, reason }));
 }

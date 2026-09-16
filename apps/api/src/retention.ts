@@ -12,7 +12,11 @@ export async function reconcilePullRequestPins(env: Env): Promise<void> {
     SELECT pr.organization_id, pr.project_id, pr.number, pr.installation_id, pr.state_version,
       p.repository_owner, p.repository_name
       FROM pull_requests pr JOIN projects p ON p.id = pr.project_id AND p.organization_id = pr.organization_id
-     WHERE pr.state IN ('open', 'unknown')
+     WHERE (pr.state IN ('open', 'unknown') OR (pr.state = 'closed' AND EXISTS (
+       SELECT 1 FROM runs r JOIN comparisons c ON c.organization_id = r.organization_id AND c.current_run_id = r.id
+        WHERE r.organization_id = pr.organization_id AND r.project_id = pr.project_id
+          AND r.pull_request_number = pr.number AND c.created_at >= unixepoch() - 31536000
+     )))
        AND (pr.last_reconciled_at IS NULL OR pr.last_reconciled_at < unixepoch() - 3600)
      ORDER BY COALESCE(pr.last_reconciled_at, 0) LIMIT 100
   `).all<ReconciledPullRequest>();
@@ -38,6 +42,25 @@ export async function reconcilePullRequestPins(env: Env): Promise<void> {
              AND EXISTS (SELECT 1 FROM pull_requests WHERE organization_id = ? AND project_id = ? AND number = ?
                AND state = 'closed' AND state_version = ?)
         `).bind(pullRequest.organization_id, `${pullRequest.project_id}:pr:${pullRequest.number}`,
+          pullRequest.organization_id, pullRequest.project_id, pullRequest.number, pullRequest.state_version + 1),
+        env.DB.prepare(`
+          INSERT INTO retention_pins (id, organization_id, owner_type, owner_id, run_id, comparison_id)
+          SELECT 'pin_' || lower(hex(randomblob(16))), ?, 'open_pull_request', ?, candidate.run_id, candidate.comparison_id
+            FROM (SELECT c.current_run_id AS run_id, c.id AS comparison_id FROM comparisons c JOIN runs current
+                    ON current.id = c.current_run_id AND current.organization_id = c.organization_id
+                   WHERE c.organization_id = ? AND c.project_id = ? AND current.pull_request_number = ?
+                  UNION SELECT c.baseline_run_id, c.id FROM comparisons c JOIN runs current
+                    ON current.id = c.current_run_id AND current.organization_id = c.organization_id
+                   WHERE c.organization_id = ? AND c.project_id = ? AND current.pull_request_number = ?
+                     AND c.baseline_run_id IS NOT NULL) candidate
+            JOIN runs r ON r.id = candidate.run_id AND r.organization_id = ?
+           WHERE r.artifacts_expired_at IS NULL AND r.artifact_expiry_owner IS NULL AND r.metadata_deletion_owner IS NULL
+             AND EXISTS (SELECT 1 FROM pull_requests WHERE organization_id = ? AND project_id = ? AND number = ?
+               AND state IN ('open', 'unknown') AND state_version = ?)
+          ON CONFLICT DO UPDATE SET released_at = NULL
+        `).bind(pullRequest.organization_id, `${pullRequest.project_id}:pr:${pullRequest.number}`,
+          pullRequest.organization_id, pullRequest.project_id, pullRequest.number,
+          pullRequest.organization_id, pullRequest.project_id, pullRequest.number, pullRequest.organization_id,
           pullRequest.organization_id, pullRequest.project_id, pullRequest.number, pullRequest.state_version + 1),
       ]);
     } catch (error) {
@@ -120,6 +143,14 @@ async function collectImages(env: Env): Promise<void> {
   for (const image of images.results ?? []) {
     await env.IMAGES.delete(image.r2_key);
     await env.DB.batch([
+      env.DB.prepare(`UPDATE organization_usage SET stored_bytes = MAX(0, stored_bytes - ?), updated_at = unixepoch()
+        WHERE organization_id = ? AND EXISTS (SELECT 1 FROM images i WHERE i.id = ? AND i.organization_id = ?
+          AND i.deletion_owner = ?
+          AND NOT EXISTS (SELECT 1 FROM screenshots WHERE organization_id = i.organization_id AND image_id = i.id)
+          AND NOT EXISTS (SELECT 1 FROM manifest_entries WHERE organization_id = i.organization_id AND image_id = i.id)
+          AND NOT EXISTS (SELECT 1 FROM comparison_entries WHERE organization_id = i.organization_id
+            AND (baseline_image_id = i.id OR current_image_id = i.id)))`)
+        .bind(image.byte_size, image.organization_id, image.id, image.organization_id, owner),
       env.DB.prepare(`DELETE FROM images WHERE id = ? AND organization_id = ? AND deletion_owner = ?
         AND NOT EXISTS (SELECT 1 FROM screenshots WHERE organization_id = ? AND image_id = ?)
         AND NOT EXISTS (SELECT 1 FROM manifest_entries WHERE organization_id = ? AND image_id = ?)
@@ -127,9 +158,6 @@ async function collectImages(env: Env): Promise<void> {
           AND (baseline_image_id = ? OR current_image_id = ?))`)
         .bind(image.id, image.organization_id, owner, image.organization_id, image.id,
           image.organization_id, image.id, image.organization_id, image.id, image.id),
-      env.DB.prepare(`UPDATE organization_usage SET stored_bytes = MAX(0, stored_bytes - ?), updated_at = unixepoch()
-        WHERE organization_id = ? AND NOT EXISTS (SELECT 1 FROM images WHERE id = ? AND organization_id = ?)`)
-        .bind(image.byte_size, image.organization_id, image.id, image.organization_id),
     ]);
   }
 }
