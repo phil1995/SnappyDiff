@@ -4,6 +4,7 @@ import { completeRunJob, verifyUploadJob } from "./verification.ts";
 import { processBaselineJob } from "./baselines.ts";
 import { deliverGitHubCheckJob, refreshGitHubStateJob } from "./github.ts";
 import { processRetentionCleanup, reconcilePullRequestPins } from "./retention.ts";
+import { processOrganizationDeletions } from "./privacy.ts";
 
 export type JobKind = "verify_upload" | "complete_run" | "select_baseline" | "deliver_github_check" | "refresh_github_state" | "reconcile" | "cleanup";
 
@@ -85,6 +86,11 @@ export async function drainJobs(env: Env, maximum = 25): Promise<number> {
 }
 
 async function executeJob(env: Env, job: PendingJob): Promise<void> {
+  if (job.organization_id) {
+    const deletion = await env.DB.prepare(`SELECT 1 AS found FROM organization_deletion_requests
+      WHERE organization_id = ? AND state = 'deleting'`).bind(job.organization_id).first();
+    if (deletion) return;
+  }
   if (job.kind === "verify_upload") return verifyUploadJob(env, job);
   if (job.kind === "complete_run") return completeRunJob(env, job);
   if (job.kind === "select_baseline") return processBaselineJob(env, job);
@@ -105,6 +111,7 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
     return;
   }
   if (job.kind === "cleanup") {
+    await processOrganizationDeletions(env);
     await reconcilePullRequestPins(env);
     const removable = await env.DB.prepare(`
       SELECT id, temporary_key FROM upload_sessions

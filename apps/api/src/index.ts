@@ -17,6 +17,9 @@ import {
   controlBaseline, createToken, getProjectOperations, listMembers, listTokens,
   revokeToken, rotateToken, updateMember, updateProjectSettings,
 } from "./management.ts";
+import {
+  cancelOrganizationDeletion, exportOrganization, requireOrganizationWritable, scheduleOrganizationDeletion,
+} from "./privacy.ts";
 
 const API_PREFIX = "/api/v1";
 
@@ -62,6 +65,7 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
   if (registerMatch || manifestMatch || finalizeMatch || uploadsMatch || completeUploadMatch || statusMatch) {
     const principal = await requireMachinePrincipal(request, env);
     await enforceRateLimit(env, `machine:${principal.organizationId}:${principal.tokenId}`, 600, 60);
+    if (request.method !== "GET") await requireOrganizationWritable(env, principal.organizationId);
     if (registerMatch?.[1] && request.method === "POST") return registerRun(request, env, principal, registerMatch[1]);
     if (manifestMatch?.[1] && manifestMatch[2] && request.method === "POST") return submitManifestPage(request, env, principal, manifestMatch[1], manifestMatch[2]);
     if (finalizeMatch?.[1] && finalizeMatch[2] && request.method === "POST") {
@@ -82,6 +86,14 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
   if (url.pathname.startsWith(API_PREFIX)) {
     const session = await requireSession(request, env);
     await enforceRateLimit(env, `api:${session.organizationId}:${session.userId}`, 300, 60);
+    if (url.pathname === `${API_PREFIX}/organization/export` && request.method === "GET") {
+      return exportOrganization(env, session);
+    }
+    if (url.pathname === `${API_PREFIX}/organization/deletion`) {
+      if (request.method === "POST") return scheduleOrganizationDeletion(request, env, session, context);
+      if (request.method === "DELETE") return cancelOrganizationDeletion(env, session, context);
+    }
+    if (request.method !== "GET") await requireOrganizationWritable(env, session.organizationId);
     if (url.pathname === `${API_PREFIX}/me` && request.method === "GET") {
       return json({ user: { id: session.userId, email: session.email, role: session.role }, organizationId: session.organizationId });
     }

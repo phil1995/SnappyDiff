@@ -33,6 +33,8 @@ The CLI reads non-secret defaults from a checked-in `.snappydiff.json` (start fr
 The complete retry, sharding, deduplication, and verification contract is documented in `docs/upload-protocol.md`.
 Baseline recovery, scoped-token rotation, PR pin reconciliation, and retention cleanup are documented in `docs/operations.md`.
 
+Production-readiness references: [WorkOS setup](docs/workos-setup.md), [GitHub App setup](docs/github-setup.md), [backup and recovery](docs/backup-recovery.md), [privacy and deletion](docs/privacy.md), [load testing](docs/load-testing.md), and the [private beta checklist](docs/private-beta.md).
+
 The local shape check reports provider secrets as disabled. Before staging or production deployment, run `npm run validate:config -- <environment-file> --require-secrets` in a protected environment or verify the equivalent Wrangler secret bindings without printing their values.
 
 Apply the local schema and optional development tenant with:

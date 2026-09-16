@@ -2,6 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { signJson, verifyJson } from "./crypto.ts";
 import { HttpError, json, readBytes } from "./http.ts";
 import type { Env } from "./platform.ts";
+import { requireOrganizationWritable } from "./privacy.ts";
 
 const FIFTEEN_MINUTES = 15 * 60;
 
@@ -69,6 +70,7 @@ export async function handleLocalUpload(request: Request, env: Env, sessionId: s
   if (!grant || grant.exp < Date.now() / 1000 || grant.sessionId !== sessionId) {
     throw new HttpError(401, "invalid_upload_grant", "Upload grant is invalid or expired");
   }
+  await requireOrganizationWritable(env, grant.organizationId);
   const session = await env.DB.prepare(`
     SELECT id FROM upload_sessions
      WHERE id = ? AND organization_id = ? AND temporary_key = ? AND expected_bytes = ?
