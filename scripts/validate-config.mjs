@@ -7,6 +7,8 @@ const requiredVariables = [
   "WORKOS_REDIRECT_URI",
   "GITHUB_APP_ID",
   "GITHUB_APP_SLUG",
+  "R2_BUCKET_NAME",
+  "CLOUDFLARE_ACCOUNT_ID",
 ];
 
 const requiredSecrets = [
@@ -16,6 +18,8 @@ const requiredSecrets = [
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_WEBHOOK_SECRET",
   "TOKEN_PEPPER",
+  "R2_ACCESS_KEY_ID",
+  "R2_SECRET_ACCESS_KEY",
 ];
 
 function parseEnvironmentFile(path) {

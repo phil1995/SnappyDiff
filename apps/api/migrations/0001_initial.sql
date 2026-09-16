@@ -16,7 +16,8 @@ CREATE TABLE organization_usage (
   stored_bytes INTEGER NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
   reserved_upload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_upload_bytes >= 0),
   upload_budget_bytes INTEGER NOT NULL DEFAULT 2147483648 CHECK (upload_budget_bytes > 0),
-  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  CHECK (stored_bytes + reserved_upload_bytes <= upload_budget_bytes)
 ) STRICT;
 
 CREATE TABLE users (

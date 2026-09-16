@@ -28,6 +28,10 @@ npm test
 
 Local D1 and R2 emulation use Wrangler and do not require cloud credentials. See `docs/deployment.md` before creating remote resources or secrets.
 
+The CLI reads non-secret defaults from a checked-in `.snappydiff.json` (start from `.snappydiff.example.json`). Supply project tokens only through `SNAPPYDIFF_TOKEN`; never place them in the configuration file or command history.
+
+The complete retry, sharding, deduplication, and verification contract is documented in `docs/upload-protocol.md`.
+
 The local shape check reports provider secrets as disabled. Before staging or production deployment, run `npm run validate:config -- <environment-file> --require-secrets` in a protected environment or verify the equivalent Wrangler secret bindings without printing their values.
 
 Apply the local schema and optional development tenant with:

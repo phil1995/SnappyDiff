@@ -23,6 +23,10 @@ Use separate `local`, `staging`, and `production` resources. Never reuse a D1 da
 - `GITHUB_APP_PRIVATE_KEY`
 - `GITHUB_WEBHOOK_SECRET`
 - `TOKEN_PEPPER` (at least 32 random bytes)
+- `R2_ACCESS_KEY_ID` (staging/production direct uploads)
+- `R2_SECRET_ACCESS_KEY` (staging/production direct uploads)
+
+Set `CLOUDFLARE_ACCOUNT_ID` and `R2_BUCKET_NAME` as non-secret environment variables. The R2 key pair should be restricted to the environment's single image bucket. Upload URLs address a service-generated temporary key and expire after 15 minutes; callers never receive canonical-object write access.
 
 Rotate secrets independently. Token hashes are peppered; rotating `TOKEN_PEPPER` requires a controlled token reissue window.
 

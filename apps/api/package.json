@@ -10,6 +10,9 @@
   "devDependencies": {
     "typescript": "^5.9.2",
     "wrangler": "^4.38.0"
+  },
+  "dependencies": {
+    "@snappydiff/contracts": "*",
+    "aws4fetch": "^1.0.20"
   }
 }
-

@@ -19,9 +19,24 @@ export interface D1Database {
 }
 
 export interface R2Bucket {
-  get(key: string): Promise<unknown | null>;
+  get(key: string): Promise<R2ObjectBody | null>;
+  head(key: string): Promise<R2Object | null>;
   put(key: string, value: ReadableStream | ArrayBuffer | string, options?: unknown): Promise<unknown>;
   delete(keys: string | string[]): Promise<void>;
+}
+
+export interface R2Object {
+  key: string;
+  version: string;
+  size: number;
+  etag: string;
+  httpEtag: string;
+  httpMetadata?: { contentType?: string };
+}
+
+export interface R2ObjectBody extends R2Object {
+  body: ReadableStream<Uint8Array>;
+  arrayBuffer(): Promise<ArrayBuffer>;
 }
 
 export interface Fetcher {
@@ -48,10 +63,14 @@ export interface Env {
   WORKOS_REDIRECT_URI: string;
   GITHUB_APP_ID: string;
   GITHUB_APP_SLUG: string;
+  R2_BUCKET_NAME: string;
   WORKOS_API_KEY?: string;
   WORKOS_WEBHOOK_SECRET?: string;
   WORKOS_COOKIE_PASSWORD?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_WEBHOOK_SECRET?: string;
   TOKEN_PEPPER?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
 }

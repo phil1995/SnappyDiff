@@ -1,5 +1,6 @@
 import { randomId } from "./crypto.ts";
 import type { Env } from "./platform.ts";
+import { completeRunJob, verifyUploadJob } from "./verification.ts";
 
 export type JobKind = "verify_upload" | "complete_run" | "select_baseline" | "deliver_github_check" | "reconcile" | "cleanup";
 
@@ -40,15 +41,18 @@ export async function enqueueJob(
 
 export async function drainJobs(env: Env, maximum = 25): Promise<number> {
   const leaseOwner = randomId("lease");
-  const candidates = await env.DB.prepare(`
-    SELECT id FROM jobs
-     WHERE status = 'pending' AND next_attempt_at <= unixepoch()
-       AND (lease_expires_at IS NULL OR lease_expires_at < unixepoch())
-     ORDER BY next_attempt_at, created_at LIMIT ?
-  `).bind(maximum).all<{ id: string }>();
-  const ids = candidates.results?.map(({ id }) => id) ?? [];
   let completed = 0;
-  for (const id of ids) {
+  let attempted = 0;
+  while (attempted < maximum) {
+    const candidate = await env.DB.prepare(`
+      SELECT id FROM jobs
+       WHERE status = 'pending' AND next_attempt_at <= unixepoch()
+         AND (lease_expires_at IS NULL OR lease_expires_at < unixepoch())
+       ORDER BY next_attempt_at, created_at LIMIT 1
+    `).first<{ id: string }>();
+    if (!candidate) break;
+    const id = candidate.id;
+    attempted++;
     const leaseUntil = Math.floor(Date.now() / 1000) + 300;
     const lease = await env.DB.prepare(`
       UPDATE jobs SET lease_owner = ?, lease_expires_at = ?, status = 'running', updated_at = unixepoch()
@@ -78,12 +82,20 @@ export async function drainJobs(env: Env, maximum = 25): Promise<number> {
 }
 
 async function executeJob(env: Env, job: PendingJob): Promise<void> {
+  if (job.kind === "verify_upload") return verifyUploadJob(env, job);
+  if (job.kind === "complete_run") return completeRunJob(env, job);
   if (job.kind === "reconcile") {
     await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < unixepoch()").run();
     await env.DB.prepare("UPDATE jobs SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL WHERE status = 'running' AND lease_expires_at < unixepoch()") .run();
     return;
   }
   if (job.kind === "cleanup") {
+    const removable = await env.DB.prepare(`
+      SELECT id, temporary_key FROM upload_sessions
+       WHERE temporary_deleted_at IS NULL AND (
+         (state IN ('pending', 'uploaded') AND expires_at < unixepoch()) OR state IN ('expired', 'published', 'failed')
+       ) LIMIT 500
+    `).all<{ id: string; temporary_key: string }>();
     await env.DB.batch([
       env.DB.prepare(`
         UPDATE organization_usage
@@ -100,6 +112,14 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
       `),
       env.DB.prepare("UPDATE upload_sessions SET state = 'expired', updated_at = unixepoch() WHERE state IN ('pending', 'uploaded') AND expires_at < unixepoch()"),
     ]);
+    const rows = removable.results ?? [];
+    if (rows.length > 0) {
+      await env.IMAGES.delete(rows.map(({ temporary_key }) => temporary_key));
+      for (const row of rows) {
+        await env.DB.prepare("UPDATE upload_sessions SET temporary_deleted_at = unixepoch(), updated_at = unixepoch() WHERE id = ?")
+          .bind(row.id).run();
+      }
+    }
     return;
   }
   throw new Error(`Job handler not implemented for ${job.kind}`);

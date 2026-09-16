@@ -6,10 +6,13 @@ import type { Env, ExecutionContext, ScheduledController } from "./platform.ts";
 import { createProject, getProject, listProjects } from "./projects.ts";
 import { enforceRateLimit } from "./rate-limit.ts";
 import { handleWorkOSWebhook } from "./workos-webhook.ts";
+import { requireMachinePrincipal } from "./machine-auth.ts";
+import { handleLocalUpload } from "./upload-urls.ts";
+import { completeUpload, finalizeShard, getRunStatus, listShardUploads, registerRun, submitManifestPage } from "./uploads.ts";
 
 const API_PREFIX = "/api/v1";
 
-async function handle(request: Request, env: Env, context: RequestContext): Promise<Response> {
+async function handle(request: Request, env: Env, context: RequestContext, execution: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/health" && request.method === "GET") {
     return json({ status: "ok", environment: env.APP_ENV });
@@ -25,6 +28,35 @@ async function handle(request: Request, env: Env, context: RequestContext): Prom
     const ipKey = await requestRateKey(request, "workos-webhook");
     await enforceRateLimit(env, ipKey, 120, 60);
     return handleWorkOSWebhook(request, env, context.requestId);
+  }
+
+  const localUploadMatch = url.pathname.match(/^\/api\/v1\/uploads\/([A-Za-z0-9_]+)\/content$/);
+  if (localUploadMatch?.[1] && request.method === "PUT") return handleLocalUpload(request, env, localUploadMatch[1]);
+
+  const registerMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/runs$/);
+  const manifestMatch = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_]+)\/shards\/([A-Za-z0-9_]+)\/manifest-pages$/);
+  const finalizeMatch = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_]+)\/shards\/([A-Za-z0-9_]+)\/finalize$/);
+  const uploadsMatch = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_]+)\/shards\/([A-Za-z0-9_]+)\/uploads$/);
+  const completeUploadMatch = url.pathname.match(/^\/api\/v1\/upload-sessions\/([A-Za-z0-9_]+)\/complete$/);
+  const statusMatch = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_]+)$/);
+  if (registerMatch || manifestMatch || finalizeMatch || uploadsMatch || completeUploadMatch || statusMatch) {
+    const principal = await requireMachinePrincipal(request, env);
+    await enforceRateLimit(env, `machine:${principal.organizationId}:${principal.tokenId}`, 600, 60);
+    if (registerMatch?.[1] && request.method === "POST") return registerRun(request, env, principal, registerMatch[1]);
+    if (manifestMatch?.[1] && manifestMatch[2] && request.method === "POST") return submitManifestPage(request, env, principal, manifestMatch[1], manifestMatch[2]);
+    if (finalizeMatch?.[1] && finalizeMatch[2] && request.method === "POST") {
+      const response = await finalizeShard(env, principal, finalizeMatch[1], finalizeMatch[2]);
+      execution.waitUntil(drainJobs(env, 10));
+      return response;
+    }
+    if (uploadsMatch?.[1] && uploadsMatch[2] && request.method === "GET") return listShardUploads(env, principal, uploadsMatch[1], uploadsMatch[2], url.searchParams.get("after"));
+    if (completeUploadMatch?.[1] && request.method === "POST") {
+      const response = await completeUpload(env, principal, completeUploadMatch[1]);
+      execution.waitUntil(drainJobs(env, 10));
+      return response;
+    }
+    if (statusMatch?.[1] && request.method === "GET") return getRunStatus(env, principal, statusMatch[1]);
+    throw new HttpError(405, "method_not_allowed", "Method is not allowed for this route");
   }
 
   if (url.pathname.startsWith(API_PREFIX)) {
@@ -69,7 +101,7 @@ export default {
     const context: RequestContext = { requestId: request.headers.get("x-request-id") ?? randomId("req"), startedAt: Date.now() };
     let response: Response;
     try {
-      response = await handle(request, env, context);
+      response = await handle(request, env, context, execution);
     } catch (error) {
       response = errorResponse(error, context.requestId);
     }
