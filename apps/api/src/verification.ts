@@ -25,6 +25,7 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
   }>();
   if (!upload || upload.state === "failed" || upload.state === "expired") return;
   if (upload.object_version !== payload.objectVersion) return;
+  if (await organizationDeletionPending(env, upload.organization_id)) return;
   if (upload.state === "published") {
     await ensureCanonicalObject(env, upload, payload.objectVersion);
     await ensureShardCompletionOutbox(env, upload);
@@ -71,16 +72,26 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
   const publication = await env.DB.prepare(`
     SELECT image_id, r2_key FROM image_publications
      WHERE organization_id = ? AND sha256 = ? AND deletion_owner IS NULL
-  `).bind(upload.organization_id, actualHash).first<{ image_id: string; r2_key: string }>();
+       AND NOT EXISTS (SELECT 1 FROM organization_deletion_requests WHERE organization_id = ?)
+  `).bind(upload.organization_id, actualHash, upload.organization_id).first<{ image_id: string; r2_key: string }>();
   if (publication) {
     await env.IMAGES.put(publication.r2_key, bytes, {
       httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: actualHash },
       onlyIf: { etagDoesNotMatch: "*" },
     });
+    if (await organizationDeletionPending(env, upload.organization_id)) {
+      await env.IMAGES.delete(publication.r2_key);
+      throw new Error("Organization deletion began during image publication");
+    }
     const stillOwned = await env.DB.prepare(`SELECT 1 AS found FROM image_publications
-      WHERE organization_id = ? AND sha256 = ? AND image_id = ? AND r2_key = ? AND deletion_owner IS NULL`)
-      .bind(upload.organization_id, actualHash, publication.image_id, publication.r2_key).first();
+      WHERE organization_id = ? AND sha256 = ? AND image_id = ? AND r2_key = ? AND deletion_owner IS NULL
+        AND NOT EXISTS (SELECT 1 FROM organization_deletion_requests WHERE organization_id = ?)`)
+      .bind(upload.organization_id, actualHash, publication.image_id, publication.r2_key, upload.organization_id).first();
     if (!stillOwned) {
+      if (await organizationDeletionPending(env, upload.organization_id)) {
+        await env.IMAGES.delete(publication.r2_key);
+        throw new Error("Organization deletion began during image publication");
+      }
       const activated = await env.DB.prepare(`SELECT 1 AS found FROM images
         WHERE organization_id = ? AND sha256 = ? AND r2_key = ? AND reference_state = 'active'`)
         .bind(upload.organization_id, actualHash, publication.r2_key).first();
@@ -97,18 +108,22 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
           SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ?
         ) AND EXISTS (SELECT 1 FROM image_publications
           WHERE organization_id = ? AND sha256 = ? AND deletion_owner IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM organization_deletion_requests WHERE organization_id = ?)
         THEN ? ELSE 0 END, updated_at = unixepoch()
        WHERE organization_id = ? AND EXISTS (
          SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
            AND state = 'verifying' AND object_version = ?
        )
-    `).bind(upload.organization_id, actualHash, upload.organization_id, actualHash, upload.expected_bytes,
+    `).bind(upload.organization_id, actualHash, upload.organization_id, actualHash, upload.organization_id,
+      upload.expected_bytes,
       upload.organization_id, upload.id, upload.organization_id, payload.objectVersion),
     env.DB.prepare(`
       INSERT INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
       SELECT p.image_id, p.organization_id, p.sha256, p.r2_key, p.content_type, p.byte_size, p.width, p.height
         FROM image_publications p
-       WHERE p.organization_id = ? AND p.sha256 = ? AND p.deletion_owner IS NULL AND EXISTS (
+       WHERE p.organization_id = ? AND p.sha256 = ? AND p.deletion_owner IS NULL
+         AND NOT EXISTS (SELECT 1 FROM organization_deletion_requests WHERE organization_id = p.organization_id)
+         AND EXISTS (
          SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
            AND state = 'verifying' AND object_version = ?
        ) ON CONFLICT (organization_id, sha256) DO NOTHING
@@ -178,7 +193,16 @@ async function ensureCanonicalObject(
     httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: upload.expected_sha256 },
     onlyIf: { etagDoesNotMatch: "*" },
   });
+  if (await organizationDeletionPending(env, upload.organization_id)) {
+    await env.IMAGES.delete(image.r2_key);
+    throw new Error("Organization deletion began while restoring a canonical image");
+  }
   return image.r2_key;
+}
+
+async function organizationDeletionPending(env: Env, organizationId: string): Promise<boolean> {
+  return Boolean(await env.DB.prepare(`SELECT 1 AS found FROM organization_deletion_requests
+    WHERE organization_id = ?`).bind(organizationId).first());
 }
 
 function completionJobStatement(

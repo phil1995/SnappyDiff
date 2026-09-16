@@ -88,7 +88,7 @@ export async function drainJobs(env: Env, maximum = 25): Promise<number> {
 async function executeJob(env: Env, job: PendingJob): Promise<void> {
   if (job.organization_id) {
     const deletion = await env.DB.prepare(`SELECT 1 AS found FROM organization_deletion_requests
-      WHERE organization_id = ? AND state = 'deleting'`).bind(job.organization_id).first();
+      WHERE organization_id = ?`).bind(job.organization_id).first();
     if (deletion) return;
   }
   if (job.kind === "verify_upload") return verifyUploadJob(env, job);
