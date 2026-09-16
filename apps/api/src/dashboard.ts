@@ -55,7 +55,7 @@ export async function getDashboardRun(env: Env, session: Session, runId: string)
 export async function getPrivateImage(env: Env, session: Session, imageId: string): Promise<Response> {
   requirePermission(session, "runs:view");
   const image = await env.DB.prepare(`
-    SELECT i.storage_key AS storageKey, i.byte_size AS byteSize
+    SELECT i.r2_key AS storageKey, i.byte_size AS byteSize
       FROM images i WHERE i.id = ? AND i.organization_id = ? AND i.reference_state = 'active'
        AND EXISTS (SELECT 1 FROM screenshots s WHERE s.organization_id = i.organization_id AND s.image_id = i.id)
   `).bind(imageId, session.organizationId).first<{ storageKey: string; byteSize: number }>();
