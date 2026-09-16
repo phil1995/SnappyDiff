@@ -69,31 +69,40 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
   `).bind(upload.organization_id, actualHash, imageId, canonicalKey, upload.expected_bytes,
     dimensions.width, dimensions.height, upload.organization_id, actualHash).run();
   const publication = await env.DB.prepare(`
-    SELECT image_id, r2_key FROM image_publications WHERE organization_id = ? AND sha256 = ?
+    SELECT image_id, r2_key FROM image_publications
+     WHERE organization_id = ? AND sha256 = ? AND deletion_owner IS NULL
   `).bind(upload.organization_id, actualHash).first<{ image_id: string; r2_key: string }>();
   if (publication) {
     await env.IMAGES.put(publication.r2_key, bytes, {
       httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: actualHash },
       onlyIf: { etagDoesNotMatch: "*" },
     });
+    const stillOwned = await env.DB.prepare(`SELECT 1 AS found FROM image_publications
+      WHERE organization_id = ? AND sha256 = ? AND image_id = ? AND r2_key = ? AND deletion_owner IS NULL`)
+      .bind(upload.organization_id, actualHash, publication.image_id, publication.r2_key).first();
+    if (!stillOwned) {
+      await env.IMAGES.delete(publication.r2_key);
+      throw new Error("Image publication was retired while uploading; verification will retry");
+    }
   }
   await env.DB.batch([
     env.DB.prepare(`
       UPDATE organization_usage SET
         stored_bytes = stored_bytes + CASE WHEN NOT EXISTS (
           SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ?
-        ) THEN ? ELSE 0 END, updated_at = unixepoch()
+        ) AND EXISTS (SELECT 1 FROM image_publications WHERE organization_id = ? AND sha256 = ?)
+        THEN ? ELSE 0 END, updated_at = unixepoch()
        WHERE organization_id = ? AND EXISTS (
          SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
            AND state = 'verifying' AND object_version = ?
        )
-    `).bind(upload.organization_id, actualHash, upload.expected_bytes,
+    `).bind(upload.organization_id, actualHash, upload.organization_id, actualHash, upload.expected_bytes,
       upload.organization_id, upload.id, upload.organization_id, payload.objectVersion),
     env.DB.prepare(`
       INSERT INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
       SELECT p.image_id, p.organization_id, p.sha256, p.r2_key, p.content_type, p.byte_size, p.width, p.height
         FROM image_publications p
-       WHERE p.organization_id = ? AND p.sha256 = ? AND EXISTS (
+       WHERE p.organization_id = ? AND p.sha256 = ? AND p.deletion_owner IS NULL AND EXISTS (
          SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
            AND state = 'verifying' AND object_version = ?
        ) ON CONFLICT (organization_id, sha256) DO NOTHING

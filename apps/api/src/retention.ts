@@ -124,7 +124,35 @@ export async function processRetentionCleanup(env: Env): Promise<void> {
     ]);
   }
   await collectImages(env);
+  await collectAbandonedPublications(env);
   await deleteMetadata(env);
+}
+
+async function collectAbandonedPublications(env: Env): Promise<void> {
+  const owner = randomId("pubgc");
+  await env.DB.prepare(`UPDATE image_publications SET deletion_owner = ?, deletion_claimed_at = unixepoch()
+    WHERE (organization_id, sha256) IN (SELECT p.organization_id, p.sha256 FROM image_publications p
+      WHERE (p.deletion_owner IS NULL OR p.deletion_claimed_at < unixepoch() - 600)
+        AND p.created_at < unixepoch() - 86400
+        AND NOT EXISTS (SELECT 1 FROM images i WHERE i.organization_id = p.organization_id
+          AND i.sha256 = p.sha256 AND i.reference_state = 'active')
+        AND NOT EXISTS (SELECT 1 FROM upload_sessions u WHERE u.organization_id = p.organization_id
+          AND u.expected_sha256 = p.sha256 AND u.state IN ('pending', 'uploaded', 'verifying')
+          AND u.expires_at >= unixepoch())
+      LIMIT 100)`).bind(owner).run();
+  const publications = await env.DB.prepare(`
+    SELECT p.organization_id, p.sha256, p.image_id, p.r2_key FROM image_publications p
+     WHERE p.deletion_owner = ? LIMIT 100
+  `).bind(owner).all<{ organization_id: string; sha256: string; image_id: string; r2_key: string }>();
+  for (const publication of publications.results ?? []) {
+    await env.IMAGES.delete(publication.r2_key);
+    await env.DB.prepare(`DELETE FROM image_publications WHERE organization_id = ? AND sha256 = ?
+      AND image_id = ? AND r2_key = ? AND deletion_owner = ? AND NOT EXISTS (
+        SELECT 1 FROM upload_sessions u WHERE u.organization_id = ? AND u.expected_sha256 = ?
+          AND u.state IN ('pending', 'uploaded', 'verifying') AND u.expires_at >= unixepoch()
+      )`).bind(publication.organization_id, publication.sha256, publication.image_id, publication.r2_key,
+      owner, publication.organization_id, publication.sha256).run();
+  }
 }
 
 async function collectImages(env: Env): Promise<void> {
