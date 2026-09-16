@@ -1,5 +1,5 @@
 const root = document.querySelector("#app");
-const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, blinkTimer: null, worker: null };
+const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, swipe: .5, blinkTimer: null, worker: null, viewerGeneration: 0, routeGeneration: 0, comparisonId: null };
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 const shortSha = (value) => String(value ?? "").slice(0, 8);
@@ -24,27 +24,31 @@ function errorPage(error) {
 }
 
 async function route() {
+  const routeGeneration = ++state.routeGeneration;
+  state.viewerGeneration++;
   clearInterval(state.blinkTimer);
   state.blinkTimer = null;
   root.innerHTML = `<main class="center"><div class="spinner" aria-label="Loading"></div></main>`;
   try {
     if (!state.me) state.me = await api("/api/v1/me");
+    if (routeGeneration !== state.routeGeneration) return;
     const path = location.pathname;
-    if (path === "/github/callback") return completeGitHubLink();
+    if (path === "/github/callback") return await completeGitHubLink(routeGeneration);
     const project = path.match(/^\/projects\/([^/]+)$/);
     const run = path.match(/^\/runs\/([^/]+)$/);
     const comparison = path.match(/^\/comparisons\/([^/]+)$/);
-    if (project) return renderProject(project[1]);
-    if (run) return renderRun(run[1]);
-    if (comparison) return renderComparison(comparison[1]);
-    return renderHome();
+    if (project) return await renderProject(project[1], routeGeneration);
+    if (run) return await renderRun(run[1], routeGeneration);
+    if (comparison) return await renderComparison(comparison[1], routeGeneration);
+    return await renderHome(routeGeneration);
   } catch (error) {
+    if (routeGeneration !== state.routeGeneration) return;
     if (error.status === 401) return renderLogin();
     errorPage(error);
   }
 }
 
-async function completeGitHubLink() {
+async function completeGitHubLink(routeGeneration) {
   const parameters = new URLSearchParams(location.search);
   const code = parameters.get("code");
   const signedState = parameters.get("state");
@@ -58,6 +62,7 @@ async function completeGitHubLink() {
   await api(`/api/v1/projects/${encodeURIComponent(projectId)}/github-installation`, {
     method: "POST", body: JSON.stringify({ code, state: signedState }),
   });
+  if (routeGeneration !== state.routeGeneration) return;
   navigate(`/projects/${encodeURIComponent(projectId)}`, true);
 }
 
@@ -66,14 +71,16 @@ function renderLogin() {
   root.innerHTML = `<main class="center"><section class="hero"><span class="eyebrow">Visual review for CI</span><h1>See the change.<br>Ship with confidence.</h1><p>Private screenshot comparisons, precise baselines, and GitHub checks—without making product images public.</p><a class="button primary" href="/auth/login">Sign in with WorkOS</a></section></main>`;
 }
 
-async function renderHome() {
+async function renderHome(routeGeneration) {
   const { projects } = await api("/api/v1/projects");
+  if (routeGeneration !== state.routeGeneration) return;
   const cards = projects.map((project) => `<a class="card" href="/projects/${encodeURIComponent(project.id)}" data-link><h2>${escapeHtml(project.name)}</h2><div class="repo">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</div><p class="muted">Default branch · ${escapeHtml(project.defaultBranch)}</p></a>`).join("");
   root.innerHTML = header(`<section class="hero"><span class="eyebrow">Workspace</span><h1>Your visual changes,<br>in one sharp view.</h1><p>Open a project to inspect recent runs, compare pixels, and resolve snapshot changes.</p></section><div class="section-head"><h2>Projects</h2><span class="muted">${projects.length} total</span></div>${cards ? `<div class="grid">${cards}</div>` : `<div class="empty">No projects yet. Create one through the API to begin uploading snapshots.</div>`}`);
 }
 
-async function renderProject(projectId) {
+async function renderProject(projectId, routeGeneration) {
   const { project, runs, nextCursor } = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/run-history`);
+  if (routeGeneration !== state.routeGeneration) return;
   const rows = runs.map(runRow).join("");
   root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>${escapeHtml(project.name)}</span></nav><span class="eyebrow">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</span><h1>${escapeHtml(project.name)}</h1><div class="section-head"><h2>Recent runs</h2><span class="muted">Newest first</span></div>${rows ? `<div class="run-list" id="run-list">${rows}</div>${nextCursor ? `<button class="button" data-runs-more="${escapeHtml(nextCursor)}">Load older runs</button>` : ""}` : `<div class="empty">No screenshot runs have arrived for this project.</div>`}`);
   root.querySelector("[data-runs-more]")?.addEventListener("click", async (event) => {
@@ -81,6 +88,7 @@ async function renderProject(projectId) {
     button.disabled = true;
     try {
       const page = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/run-history?before=${encodeURIComponent(button.dataset.runsMore)}`);
+      if (routeGeneration !== state.routeGeneration) return;
       root.querySelector("#run-list").insertAdjacentHTML("beforeend", page.runs.map(runRow).join(""));
       if (page.nextCursor) { button.dataset.runsMore = page.nextCursor; button.disabled = false; } else button.remove();
     } catch (error) { button.textContent = error.message; }
@@ -93,14 +101,18 @@ function runRow(run) {
   return `<a class="run-row" href="${target}" data-link><div class="run-meta"><strong>${escapeHtml(run.branch)}</strong><small><span class="sha">${escapeHtml(shortSha(run.commitSha))}</span> · ${formatDate(run.createdAt)}</small></div><div>${run.pullRequestNumber ? `PR #${run.pullRequestNumber}` : "Branch run"}</div><span class="pill ${escapeHtml(status)}">${escapeHtml(String(status).replaceAll("_", " "))}</span><div class="counts"><span><b>${run.changedCount ?? 0}</b> changed</span><span><b>${run.addedCount ?? 0}</b> added</span><span><b>${run.removedCount ?? 0}</b> removed</span></div></a>`;
 }
 
-async function renderRun(runId) {
+async function renderRun(runId, routeGeneration) {
   const { run, shards } = await api(`/api/v1/dashboard/runs/${encodeURIComponent(runId)}`);
+  if (routeGeneration !== state.routeGeneration) return;
   if (run.comparisonId) return navigate(`/comparisons/${run.comparisonId}`, true);
   root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(run.projectId)}" data-link>${escapeHtml(run.projectName)}</a><span>/</span><span>${escapeHtml(shortSha(run.commitSha))}</span></nav><span class="pill ${escapeHtml(run.state)}">${escapeHtml(run.state)}</span><h1>Run ${escapeHtml(shortSha(run.commitSha))}</h1><p class="muted">${escapeHtml(run.branch)} · attempt ${run.attemptNumber} · ${formatDate(run.createdAt)}</p><div class="stats"><div class="stat"><b>${run.screenshotCount}</b><span>Screenshots</span></div><div class="stat"><b>${formatBytes(run.logicalBytes)}</b><span>Logical size</span></div><div class="stat"><b>${shards.length}</b><span>Shards</span></div><div class="stat"><b>${run.pullRequestNumber ? `#${run.pullRequestNumber}` : "—"}</b><span>Pull request</span></div></div><div class="empty">The comparison is still being prepared. This page will link to the visual report when processing completes.</div>`);
 }
 
-async function renderComparison(comparisonId) {
+async function renderComparison(comparisonId, routeGeneration = state.routeGeneration) {
   const payload = await api(`/api/v1/comparisons/${encodeURIComponent(comparisonId)}`);
+  if (routeGeneration !== state.routeGeneration) return;
+  if (state.comparisonId !== comparisonId) state.selected = 0;
+  state.comparisonId = comparisonId;
   state.entries = payload.entries;
   state.selected = Math.min(state.selected, Math.max(0, state.entries.length - 1));
   const comparison = payload.comparison;
@@ -108,7 +120,7 @@ async function renderComparison(comparisonId) {
   const decision = comparison.status === "action_required" ? `<textarea class="note" maxlength="2000" placeholder="Optional review note" aria-label="Review note"></textarea><div class="decision"><button class="button primary" data-decision="accepted">Accept changes</button><button class="button danger" data-decision="rejected">Reject</button></div>` : `<span class="pill ${escapeHtml(comparison.status)}">${escapeHtml(comparison.status.replaceAll("_", " "))}</span>`;
   const content = `<div class="review-layout"><aside class="review-sidebar"><nav class="crumbs"><a href="/projects/${encodeURIComponent(comparison.projectId)}" data-link>${escapeHtml(comparison.projectName)}</a><span>/</span><span>${escapeHtml(shortSha(comparison.commitSha))}</span></nav><div id="entries">${sidebar || `<div class="empty">No screenshots</div>`}</div>${payload.nextCursor ? `<button class="button" data-load-more="${escapeHtml(payload.nextCursor)}">Load more</button>` : ""}</aside><section class="review-main"><div class="review-head"><div><span class="eyebrow">${escapeHtml(comparison.branch)}</span><h2>Visual comparison</h2><div class="counts"><span><b>${comparison.changedCount}</b> changed</span><span><b>${comparison.addedCount}</b> added</span><span><b>${comparison.removedCount}</b> removed</span></div></div><div>${decision}</div></div><div id="viewer"></div></section></div>`;
   root.innerHTML = header(content, true);
-  bindComparison(comparisonId, comparison);
+  bindComparison(comparisonId, comparison, routeGeneration);
   renderSelected();
 }
 
@@ -116,17 +128,20 @@ function entryButton(entry, index) {
   return `<button class="entry ${index === state.selected ? "active" : ""}" data-entry="${index}" data-kind="${escapeHtml(entry.kind)}"><span class="entry-dot"></span><span class="entry-name">${escapeHtml(entry.name)}</span></button>`;
 }
 
-function bindComparison(comparisonId, comparison) {
-  root.querySelectorAll("[data-entry]").forEach((button) => button.addEventListener("click", () => selectEntry(Number(button.dataset.entry))));
+function bindComparison(comparisonId, comparison, routeGeneration) {
+  root.querySelector("#entries")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-entry]");
+    if (button) selectEntry(Number(button.dataset.entry));
+  });
   root.querySelector("[data-load-more]")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
     try {
       const next = await api(`/api/v1/comparisons/${encodeURIComponent(comparisonId)}?after=${encodeURIComponent(button.dataset.loadMore)}`);
+      if (routeGeneration !== state.routeGeneration || state.comparisonId !== comparisonId) return;
       const offset = state.entries.length;
       state.entries.push(...next.entries);
       root.querySelector("#entries").insertAdjacentHTML("beforeend", next.entries.map((entry, index) => entryButton(entry, offset + index)).join(""));
-      root.querySelectorAll("[data-entry]").forEach((entryButtonElement) => entryButtonElement.onclick = () => selectEntry(Number(entryButtonElement.dataset.entry)));
       if (next.nextCursor) { button.dataset.loadMore = next.nextCursor; button.disabled = false; } else button.remove();
     } catch (error) { button.textContent = error.message; }
   });
@@ -134,7 +149,8 @@ function bindComparison(comparisonId, comparison) {
     button.disabled = true;
     try {
       await api(`/api/v1/comparisons/${encodeURIComponent(comparisonId)}/decision`, { method: "POST", body: JSON.stringify({ decision: button.dataset.decision, note: root.querySelector(".note")?.value || undefined }) });
-      await renderComparison(comparisonId);
+      if (routeGeneration !== state.routeGeneration || state.comparisonId !== comparisonId) return;
+      await renderComparison(comparisonId, routeGeneration);
     } catch (error) { button.disabled = false; button.textContent = error.message; }
   }));
   document.title = `${shortSha(comparison.commitSha)} · SnappyDiff`;
@@ -150,6 +166,7 @@ function selectEntry(index) {
 function imageUrl(id) { return id ? `/api/v1/images/${encodeURIComponent(id)}/content` : null; }
 
 function renderSelected() {
+  const generation = ++state.viewerGeneration;
   clearInterval(state.blinkTimer);
   state.blinkTimer = null;
   const viewer = root.querySelector("#viewer");
@@ -160,20 +177,28 @@ function renderSelected() {
   const current = imageUrl(entry.currentImageId);
   const modes = baseline && current ? ["overlay", "swipe", "blink", "highlight"] : ["image"];
   if (!modes.includes(state.mode)) state.mode = modes[0];
-  viewer.innerHTML = `<div class="toolbar">${modes.map((mode) => `<button class="tool ${state.mode === mode ? "active" : ""}" data-mode="${mode}">${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}<span class="tool-spacer"></span><button class="tool" data-zoom="out">−</button><span class="tool">${Math.round(state.zoom * 100)}%</span><button class="tool" data-zoom="in">+</button></div><div class="viewport"><div class="image-stage"><div class="spinner"></div></div></div>`;
+  const swipeControl = state.mode === "swipe" ? `<label class="swipe-control">Split <input type="range" min="0" max="100" value="${Math.round(state.swipe * 100)}" data-swipe aria-label="Swipe split position"><output>${Math.round(state.swipe * 100)}%</output></label>` : "";
+  viewer.innerHTML = `<div class="toolbar">${modes.map((mode) => `<button class="tool ${state.mode === mode ? "active" : ""}" data-mode="${mode}">${mode[0].toUpperCase()}${mode.slice(1)}</button>`).join("")}${swipeControl}<span class="tool-spacer"></span><button class="tool" data-zoom="out" aria-label="Zoom out">−</button><span class="tool">${Math.round(state.zoom * 100)}%</span><button class="tool" data-zoom="in" aria-label="Zoom in">+</button></div><div class="viewport"><div class="image-stage"><div class="spinner"></div></div></div>`;
   viewer.querySelectorAll("[data-mode]").forEach((button) => button.onclick = () => { state.mode = button.dataset.mode; renderSelected(); });
   viewer.querySelectorAll("[data-zoom]").forEach((button) => button.onclick = () => { state.zoom = Math.max(.25, Math.min(4, state.zoom + (button.dataset.zoom === "in" ? .25 : -.25))); renderSelected(); });
-  if (state.mode === "highlight") return renderHighlight(baseline, current);
-  renderImages(baseline, current, entry);
+  viewer.querySelector("[data-swipe]")?.addEventListener("input", (event) => {
+    state.swipe = Number(event.target.value) / 100;
+    event.target.nextElementSibling.value = `${event.target.value}%`;
+    const layer = root.querySelector(".image-layer");
+    if (layer) layer.style.clipPath = `inset(0 ${(1 - state.swipe) * 100}% 0 0)`;
+  });
+  if (state.mode === "highlight") return renderHighlight(baseline, current, generation);
+  renderImages(baseline, current, entry, generation);
 }
 
-function renderImages(baseline, current, entry) {
+function renderImages(baseline, current, entry, generation) {
   const stage = root.querySelector(".image-stage");
   const primary = current || baseline;
   const image = new Image();
   image.src = primary;
   image.alt = entry.name;
   image.onload = async () => {
+    if (generation !== state.viewerGeneration || !stage.isConnected) return;
     const width = image.naturalWidth * state.zoom;
     const height = image.naturalHeight * state.zoom;
     const stack = document.createElement("div");
@@ -184,34 +209,36 @@ function renderImages(baseline, current, entry) {
     else {
       const before = new Image(); before.src = baseline; before.alt = `Baseline: ${entry.name}`;
       await before.decode().catch(() => null);
-      if (!before.naturalWidth) return showImageError("The baseline image could not be decoded.");
-      if (before.naturalWidth !== image.naturalWidth || before.naturalHeight !== image.naturalHeight) return showImageError(`Dimension mismatch: baseline is ${before.naturalWidth}×${before.naturalHeight}, current is ${image.naturalWidth}×${image.naturalHeight}.`);
+      if (generation !== state.viewerGeneration || !stage.isConnected) return;
+      if (!before.naturalWidth) return showImageError("The baseline image could not be decoded.", generation);
+      if (before.naturalWidth !== image.naturalWidth || before.naturalHeight !== image.naturalHeight) return showImageError(`Dimension mismatch: baseline is ${before.naturalWidth}×${before.naturalHeight}, current is ${image.naturalWidth}×${image.naturalHeight}.`, generation);
       before.style.width = `${width}px`; before.style.height = `${height}px`; stack.append(before);
       const layer = document.createElement("div"); layer.className = "image-layer"; layer.append(primaryImage); stack.append(layer);
       if (state.mode === "overlay") layer.style.opacity = ".5";
       if (state.mode === "swipe") {
-        layer.style.clipPath = "inset(0 50% 0 0)";
-        stack.onpointermove = (event) => { const rect = stack.getBoundingClientRect(); const position = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)); layer.style.clipPath = `inset(0 ${(1 - position) * 100}% 0 0)`; };
+        layer.style.clipPath = `inset(0 ${(1 - state.swipe) * 100}% 0 0)`;
+        stack.onpointermove = (event) => { const rect = stack.getBoundingClientRect(); state.swipe = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)); layer.style.clipPath = `inset(0 ${(1 - state.swipe) * 100}% 0 0)`; const input = root.querySelector("[data-swipe]"); if (input) { input.value = String(Math.round(state.swipe * 100)); input.nextElementSibling.value = `${input.value}%`; } };
       }
-      if (state.mode === "blink") state.blinkTimer = setInterval(() => { layer.style.visibility = layer.style.visibility === "hidden" ? "visible" : "hidden"; }, 650);
+      if (state.mode === "blink" && generation === state.viewerGeneration) state.blinkTimer = setInterval(() => { if (generation !== state.viewerGeneration) return clearInterval(state.blinkTimer); layer.style.visibility = layer.style.visibility === "hidden" ? "visible" : "hidden"; }, 650);
     }
     stage.replaceChildren(stack);
   };
-  image.onerror = () => showImageError("The screenshot could not be loaded or decoded.");
+  image.onerror = () => showImageError("The screenshot could not be loaded or decoded.", generation);
 }
 
-function showImageError(message) {
+function showImageError(message, generation = state.viewerGeneration) {
+  if (generation !== state.viewerGeneration) return;
   const stage = root.querySelector(".image-stage");
   if (stage) stage.innerHTML = `<div class="image-error">${escapeHtml(message)}</div>`;
 }
 
-function renderHighlight(baseline, current) {
-  if (!baseline || !current) return showImageError("Highlighted diff requires both a baseline and current image.");
+function renderHighlight(baseline, current, generation) {
+  if (!baseline || !current) return showImageError("Highlighted diff requires both a baseline and current image.", generation);
   const worker = state.worker ||= new Worker("/diff-worker.js", { type: "module" });
   const requestId = crypto.randomUUID();
   worker.onmessage = (event) => {
-    if (event.data.requestId !== requestId) return;
-    if (event.data.error) return showImageError(event.data.error);
+    if (event.data.requestId !== requestId || generation !== state.viewerGeneration) return;
+    if (event.data.error) return showImageError(event.data.error, generation);
     const canvas = document.createElement("canvas");
     canvas.width = event.data.bitmap.width; canvas.height = event.data.bitmap.height;
     canvas.style.width = `${canvas.width * state.zoom}px`; canvas.style.height = `${canvas.height * state.zoom}px`;

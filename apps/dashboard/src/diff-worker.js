@@ -21,7 +21,7 @@ self.onmessage = async (event) => {
     const pixels = output.data;
     for (let index = 0; index < pixels.length; index += 4) {
       const delta = Math.abs(pixels[index] - baselinePixels[index]) + Math.abs(pixels[index + 1] - baselinePixels[index + 1]) + Math.abs(pixels[index + 2] - baselinePixels[index + 2]) + Math.abs(pixels[index + 3] - baselinePixels[index + 3]);
-      if (delta > 24) { pixels[index] = 255; pixels[index + 1] = 45; pixels[index + 2] = 173; pixels[index + 3] = 255; }
+      if (delta > 0) { pixels[index] = 255; pixels[index + 1] = 45; pixels[index + 2] = 173; pixels[index + 3] = 255; }
       else { pixels[index] = Math.round(pixels[index] * .22); pixels[index + 1] = Math.round(pixels[index + 1] * .22); pixels[index + 2] = Math.round(pixels[index + 2] * .22); pixels[index + 3] = 255; }
     }
     context.putImageData(output, 0, 0);
