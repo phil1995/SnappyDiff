@@ -35,8 +35,10 @@ async function route() {
     const path = location.pathname;
     if (path === "/github/callback") return await completeGitHubLink(routeGeneration);
     const project = path.match(/^\/projects\/([^/]+)$/);
+    const projectSettings = path.match(/^\/projects\/([^/]+)\/settings$/);
     const run = path.match(/^\/runs\/([^/]+)$/);
     const comparison = path.match(/^\/comparisons\/([^/]+)$/);
+    if (projectSettings) return await renderSettings(projectSettings[1], routeGeneration);
     if (project) return await renderProject(project[1], routeGeneration);
     if (run) return await renderRun(run[1], routeGeneration);
     if (comparison) return await renderComparison(comparison[1], routeGeneration);
@@ -82,7 +84,8 @@ async function renderProject(projectId, routeGeneration) {
   const { project, runs, nextCursor } = await api(`/api/v1/projects/${encodeURIComponent(projectId)}/run-history`);
   if (routeGeneration !== state.routeGeneration) return;
   const rows = runs.map(runRow).join("");
-  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>${escapeHtml(project.name)}</span></nav><span class="eyebrow">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</span><h1>${escapeHtml(project.name)}</h1><div class="section-head"><h2>Recent runs</h2><span class="muted">Newest first</span></div>${rows ? `<div class="run-list" id="run-list">${rows}</div>${nextCursor ? `<button class="button" data-runs-more="${escapeHtml(nextCursor)}">Load older runs</button>` : ""}` : `<div class="empty">No screenshot runs have arrived for this project.</div>`}`);
+  const settings = state.me.user.role === "admin" ? `<a class="button" href="/projects/${encodeURIComponent(projectId)}/settings" data-link>Project settings</a>` : "";
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>${escapeHtml(project.name)}</span></nav><span class="eyebrow">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</span><div class="title-row"><h1>${escapeHtml(project.name)}</h1>${settings}</div><div class="section-head"><h2>Recent runs</h2><span class="muted">Newest first</span></div>${rows ? `<div class="run-list" id="run-list">${rows}</div>${nextCursor ? `<button class="button" data-runs-more="${escapeHtml(nextCursor)}">Load older runs</button>` : ""}` : `<div class="empty">No screenshot runs have arrived for this project.</div>`}`);
   root.querySelector("[data-runs-more]")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
@@ -93,6 +96,52 @@ async function renderProject(projectId, routeGeneration) {
       if (page.nextCursor) { button.dataset.runsMore = page.nextCursor; button.disabled = false; } else button.remove();
     } catch (error) { button.textContent = error.message; }
   });
+}
+
+async function renderSettings(projectId, routeGeneration) {
+  const admin = state.me.user.role === "admin";
+  const [operations, tokenPayload, memberPayload] = await Promise.all([
+    api(`/api/v1/projects/${encodeURIComponent(projectId)}/settings`),
+    admin ? api(`/api/v1/projects/${encodeURIComponent(projectId)}/tokens`) : Promise.resolve({ tokens: [] }),
+    admin ? api("/api/v1/members") : Promise.resolve({ members: [] }),
+  ]);
+  if (routeGeneration !== state.routeGeneration) return;
+  const project = operations.project;
+  const warningHtml = operations.retentionWarnings.map((warning) => `<div class="warning">PR #${warning.number} retention is preserved because GitHub state could not be reconciled. ${escapeHtml(warning.reconciliationError || "")}</div>`).join("");
+  const history = operations.baselineHistory.map((item) => `<div class="history-row"><span class="pill">${escapeHtml(item.action)}</span><span class="sha">${escapeHtml(shortSha(item.commitSha))}</span><span>${escapeHtml(item.actorEmail || "automation")}</span><time>${formatDate(item.createdAt)}</time></div>`).join("");
+  const tokens = tokenPayload.tokens.map((token) => `<div class="management-row"><div><strong>${escapeHtml(token.name)}</strong><small>${escapeHtml(token.tokenPrefix)}… · expires ${formatDate(token.expiresAt)}${token.revokedAt ? " · revoked" : ""}</small></div>${token.revokedAt ? "" : `<div><button class="button" data-rotate-token="${escapeHtml(token.id)}">Rotate</button> <button class="button danger" data-revoke-token="${escapeHtml(token.id)}">Revoke</button></div>`}</div>`).join("");
+  const members = memberPayload.members.map((member) => `<div class="management-row"><div><strong>${escapeHtml(member.email)}</strong><small>${escapeHtml(member.displayName)}</small></div><div><select data-member-role="${escapeHtml(member.id)}"><option ${member.role === "viewer" ? "selected" : ""}>viewer</option><option ${member.role === "reviewer" ? "selected" : ""}>reviewer</option><option ${member.role === "admin" ? "selected" : ""}>admin</option></select> <select data-member-status="${escapeHtml(member.id)}"><option ${member.status === "active" ? "selected" : ""}>active</option><option ${member.status === "suspended" ? "selected" : ""}>suspended</option></select></div></div>`).join("");
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(projectId)}" data-link>${escapeHtml(project.name)}</a><span>/</span><span>Settings</span></nav><span class="eyebrow">Operations</span><h1>${escapeHtml(project.name)}</h1>${warningHtml}<div class="settings-grid"><section class="settings-card"><h2>Project</h2><form data-project-settings><label>Name<input name="name" value="${escapeHtml(project.name)}" required maxlength="100"></label><label>Default branch<input name="defaultBranch" value="${escapeHtml(project.defaultBranch)}" required maxlength="255"></label><div class="field-pair"><label>Artifact days<input name="retentionDays" type="number" min="1" max="3650" value="${project.retentionDays}"></label><label>Promoted days<input name="promotedRetentionDays" type="number" min="365" max="3650" value="${project.promotedRetentionDays}"></label></div><button class="button primary" ${admin ? "" : "disabled"}>Save settings</button></form></section><section class="settings-card"><h2>Baseline control</h2><p class="muted">Active <span class="sha">${escapeHtml(shortSha(project.activeBaselineSha) || "none")}</span> · mode ${escapeHtml(project.promotionMode)}${project.rollbackSha ? ` · rollback ${escapeHtml(shortSha(project.rollbackSha))}` : ""}</p><div class="decision"><button class="button" data-baseline-action="pause" ${admin ? "" : "disabled"}>Pause</button><button class="button primary" data-baseline-action="resume" ${admin ? "" : "disabled"}>Resume</button><button class="button" data-baseline-action="clear_rollback" ${admin ? "" : "disabled"}>Clear rollback</button></div><label>Run ID for rollback or history reset<input data-baseline-run placeholder="run_…" ${admin ? "" : "disabled"}></label><div class="decision"><button class="button" data-baseline-action="rollback" ${admin ? "" : "disabled"}>Rollback view</button><button class="button danger" data-baseline-action="history_reset" ${admin ? "" : "disabled"}>Confirm history reset</button></div></section><section class="settings-card wide"><h2>Baseline history</h2>${history || `<div class="empty">No baseline history yet.</div>`}</section>${admin ? `<section class="settings-card"><h2>Project tokens</h2><form data-token-create><label>Name<input name="name" required maxlength="100" placeholder="CI upload"></label><label>Expiry days<input name="expiresInDays" type="number" min="1" max="365" value="90"></label><button class="button primary">Create scoped token</button></form><div data-token-secret></div><div>${tokens || `<p class="muted">No tokens.</p>`}</div></section><section class="settings-card"><h2>GitHub installation</h2><form data-github-link><label>Installation ID<input name="installationId" type="number" min="1" required></label><button class="button">Authorize and link</button></form><p class="muted">GitHub authorization verifies that you administer this repository before linking.</p></section><section class="settings-card wide"><h2>Members</h2>${members}</section>` : ""}</div>`);
+  bindSettings(projectId, routeGeneration);
+}
+
+function bindSettings(projectId, routeGeneration) {
+  root.querySelector("[data-project-settings]")?.addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    await settingsAction(event.submitter, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/settings`, { method: "PATCH", body: JSON.stringify({ name: form.get("name"), defaultBranch: form.get("defaultBranch"), retentionDays: Number(form.get("retentionDays")), promotedRetentionDays: Number(form.get("promotedRetentionDays")) }) }));
+  });
+  root.querySelectorAll("[data-baseline-action]").forEach((button) => button.onclick = async () => {
+    await settingsAction(button, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/baseline-control`, { method: "POST", body: JSON.stringify({ action: button.dataset.baselineAction, runId: root.querySelector("[data-baseline-run]").value || undefined }) }));
+    if (routeGeneration === state.routeGeneration) await renderSettings(projectId, routeGeneration);
+  });
+  root.querySelector("[data-token-create]")?.addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    const result = await settingsAction(event.submitter, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/tokens`, { method: "POST", body: JSON.stringify({ name: form.get("name"), scopes: ["runs:create"], expiresInDays: Number(form.get("expiresInDays")) }) }));
+    if (result && routeGeneration === state.routeGeneration) root.querySelector("[data-token-secret]").innerHTML = `<div class="secret"><strong>Copy now—shown once</strong><code>${escapeHtml(result.token)}</code></div>`;
+  });
+  root.querySelectorAll("[data-revoke-token]").forEach((button) => button.onclick = async () => { await settingsAction(button, () => api(`/api/v1/tokens/${encodeURIComponent(button.dataset.revokeToken)}`, { method: "DELETE" })); if (routeGeneration === state.routeGeneration) await renderSettings(projectId, routeGeneration); });
+  root.querySelectorAll("[data-rotate-token]").forEach((button) => button.onclick = async () => { const result = await settingsAction(button, () => api(`/api/v1/tokens/${encodeURIComponent(button.dataset.rotateToken)}/rotate`, { method: "POST", body: "{}" })); if (result && routeGeneration === state.routeGeneration) { await renderSettings(projectId, routeGeneration); root.querySelector("[data-token-secret]").innerHTML = `<div class="secret"><strong>Replacement token—copy now</strong><code>${escapeHtml(result.token)}</code></div>`; } });
+  root.querySelectorAll("[data-member-role], [data-member-status]").forEach((select) => select.onchange = async () => { const userId = select.dataset.memberRole || select.dataset.memberStatus; const role = root.querySelector(`[data-member-role="${CSS.escape(userId)}"]`).value; const status = root.querySelector(`[data-member-status="${CSS.escape(userId)}"]`).value; await settingsAction(select, () => api(`/api/v1/members/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ role, status }) })); });
+  root.querySelector("[data-github-link]")?.addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const result = await settingsAction(event.submitter, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/github-installation/authorize`, { method: "POST", body: JSON.stringify({ installationId: Number(form.get("installationId")) }) })); if (result) location.assign(result.authorizationUrl); });
+}
+
+async function settingsAction(control, operation) {
+  const canLabel = control?.tagName === "BUTTON";
+  const original = canLabel ? control.textContent : null;
+  if (control) control.disabled = true;
+  try { return await operation(); }
+  catch (error) { if (canLabel) control.textContent = error.message; else if (control) control.title = error.message; return null; }
+  finally { if (control) { control.disabled = false; if (canLabel) setTimeout(() => { if (control.isConnected) control.textContent = original; }, 2500); } }
 }
 
 function runRow(run) {
@@ -175,6 +224,7 @@ function renderSelected() {
   if (!entry) { viewer.innerHTML = `<div class="empty">This comparison has no screenshot entries.</div>`; return; }
   const baseline = imageUrl(entry.baselineImageId);
   const current = imageUrl(entry.currentImageId);
+  if (!baseline && !current) { viewer.innerHTML = `<div class="empty">Image artifacts for this historical comparison have expired under the project retention policy.</div>`; return; }
   const modes = baseline && current ? ["overlay", "swipe", "blink", "highlight"] : ["image"];
   if (!modes.includes(state.mode)) state.mode = modes[0];
   const swipeControl = state.mode === "swipe" ? `<label class="swipe-control">Split <input type="range" min="0" max="100" value="${Math.round(state.swipe * 100)}" data-swipe aria-label="Swipe split position"><output>${Math.round(state.swipe * 100)}%</output></label>` : "";

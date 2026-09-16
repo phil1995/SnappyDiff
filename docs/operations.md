@@ -1,29 +1,30 @@
-# Operations runbook
+# Project operations and retention
 
-## Provision the first organization administrator
+Project administrators manage retention, GitHub installation ownership, member roles, scoped upload tokens, and baseline recovery from the authenticated project settings page. Every mutation is tenant-scoped and writes an audit event. Newly created or rotated token values are returned once; only a peppered SHA-256 digest and display prefix are stored.
 
-Organization creation is an operator-controlled action in the initial release. After creating the organization in WorkOS, insert the SnappyDiff organization and usage row in one D1 batch, then let the administrator attempt one login so the `users` row is created. Add the matching `(organization_id, user_id)` membership with role `admin`. Do not create memberships from email addresses alone; use the verified WorkOS user identifier recorded by the callback.
+## Baseline recovery
 
-WorkOS membership webhooks must target `/webhooks/workos`. Signed membership deletion and update events synchronize local access, while application sessions expire after 15 minutes as a bounded fallback. Provider delivery failures are an alert condition.
+Automatic promotion follows known default-branch ancestry. A non-fast-forward or incomplete history pauses promotion instead of guessing. Administrators can:
 
-The local-only `apps/api/scripts/seed-local.sql` creates a development organization and quota. It is outside the migrations directory so it cannot be applied during a remote migration by accident.
+- pause automatic promotion while investigating history;
+- apply a temporary rollback override without changing the active baseline;
+- clear that override;
+- resume only when the active baseline is an ancestor of the refreshed default head; or
+- explicitly reset history to a complete, first-party run whose commit matches the known default head.
 
-## Scheduled work
+Baseline mutations use the suite version as a compare-and-swap guard. Active and rollback runs receive separate retention pins, and baseline history records the actor and previous run.
 
-The Worker runs every five minutes. It creates tenant-scoped reconciliation jobs and leases ready jobs for 60 seconds. Failed jobs use bounded exponential backoff and become `failed` after ten attempts. Operators should alert on failed jobs and replay them only after addressing the stored error; replay tooling is added with the upload workflows that define job-specific safety checks.
+## Retention and cleanup
 
-## Logs and request IDs
+The scheduled cleanup job expires ordinary image artifacts after the project retention period and historically promoted artifacts after the promoted retention period. Active baselines, rollback overrides, and both sides of open-PR comparisons remain pinned. Pull-request state is reconciled hourly; failed or unavailable GitHub access marks retention as unresolved and preserves pins.
 
-Every request receives an `x-request-id`, which is included in structured logs and audit events. Logs contain identifiers and error classes, never session cookies, bearer tokens, provider payloads, image bytes, or secret values.
+Artifact expiration removes screenshot references while retaining run and comparison summaries. Shared image objects are marked `deleting` only after every screenshot, manifest, comparison, and active pin reference is gone. Upload verification waits while the same hash is deleting. R2 deletion happens before the guarded D1 row removal; retries reconcile interruptions, and stored-byte accounting changes only after the row is gone.
 
-## Database rollout
+Unpinned run metadata is removed after one year. Temporary uploads continue to use the shorter cleanup policy described in [upload-protocol.md](upload-protocol.md).
 
-Migrations are forward-only. Apply migrations to staging, exercise the prior and candidate Worker against the upgraded schema, then deploy the candidate Worker. Production schema changes must remain compatible with the previous Worker throughout the rollback window.
+## Operational cautions
 
-## Incident defaults
-
-- Authentication uncertainty: reject the request and preserve data.
-- GitHub installation or PR-state uncertainty: preserve retention pins.
-- Job lease uncertainty: wait for lease expiry; never manually run the same effect concurrently.
-- R2 publication uncertainty: re-verify the exact temporary object version before publishing.
-- Tenant-boundary concern: disable the affected route or token class and retain audit data.
+- Treat history reset as an exceptional recovery operation and verify the refreshed default head first.
+- Keep at least one active administrator; the API rejects suspension or demotion of the final active admin.
+- Rotate project tokens periodically and immediately after suspected exposure. Rotation atomically revokes the predecessor.
+- Do not reduce retention without communicating that the next cleanup pass may expire newly eligible artifacts.

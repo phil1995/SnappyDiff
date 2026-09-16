@@ -13,6 +13,10 @@ import { beginGitHubInstallationLink, handleGitHubWebhook, linkGitHubInstallatio
 import { decideComparison, getComparison } from "./reports.ts";
 import { exchangeGitHubOidc } from "./github-oidc.ts";
 import { getDashboardRun, getPrivateImage, listProjectRuns } from "./dashboard.ts";
+import {
+  controlBaseline, createToken, getProjectOperations, listMembers, listTokens,
+  revokeToken, rotateToken, updateMember, updateProjectSettings,
+} from "./management.ts";
 
 const API_PREFIX = "/api/v1";
 
@@ -103,6 +107,25 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     if (dashboardRunMatch?.[1] && request.method === "GET") return getDashboardRun(env, session, dashboardRunMatch[1]);
     const imageMatch = url.pathname.match(/^\/api\/v1\/images\/([A-Za-z0-9_]+)\/content$/);
     if (imageMatch?.[1] && request.method === "GET") return getPrivateImage(env, session, imageMatch[1]);
+    const settingsMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/settings$/);
+    if (settingsMatch?.[1]) {
+      if (request.method === "GET") return getProjectOperations(env, session, settingsMatch[1]);
+      if (request.method === "PATCH") return updateProjectSettings(request, env, session, settingsMatch[1], context);
+    }
+    const baselineControlMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/baseline-control$/);
+    if (baselineControlMatch?.[1] && request.method === "POST") return controlBaseline(request, env, session, baselineControlMatch[1], context);
+    if (url.pathname === `${API_PREFIX}/members` && request.method === "GET") return listMembers(env, session);
+    const memberMatch = url.pathname.match(/^\/api\/v1\/members\/([A-Za-z0-9_]+)$/);
+    if (memberMatch?.[1] && request.method === "PATCH") return updateMember(request, env, session, memberMatch[1], context);
+    const projectTokensMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/tokens$/);
+    if (projectTokensMatch?.[1]) {
+      if (request.method === "GET") return listTokens(env, session, projectTokensMatch[1]);
+      if (request.method === "POST") return createToken(request, env, session, projectTokensMatch[1], context);
+    }
+    const tokenMatch = url.pathname.match(/^\/api\/v1\/tokens\/([A-Za-z0-9_]+)$/);
+    if (tokenMatch?.[1] && request.method === "DELETE") return revokeToken(env, session, tokenMatch[1], context);
+    const tokenRotationMatch = url.pathname.match(/^\/api\/v1\/tokens\/([A-Za-z0-9_]+)\/rotate$/);
+    if (tokenRotationMatch?.[1] && request.method === "POST") return rotateToken(request, env, session, tokenRotationMatch[1], context);
     const projectMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)$/);
     if (projectMatch?.[1] && request.method === "GET") return getProject(env, session, projectMatch[1]);
     throw new HttpError(404, "route_not_found", "API route was not found");

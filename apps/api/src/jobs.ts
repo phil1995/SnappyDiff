@@ -3,6 +3,7 @@ import type { Env } from "./platform.ts";
 import { completeRunJob, verifyUploadJob } from "./verification.ts";
 import { processBaselineJob } from "./baselines.ts";
 import { deliverGitHubCheckJob, refreshGitHubStateJob } from "./github.ts";
+import { processRetentionCleanup, reconcilePullRequestPins } from "./retention.ts";
 
 export type JobKind = "verify_upload" | "complete_run" | "select_baseline" | "deliver_github_check" | "refresh_github_state" | "reconcile" | "cleanup";
 
@@ -104,6 +105,7 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
     return;
   }
   if (job.kind === "cleanup") {
+    await reconcilePullRequestPins(env);
     const removable = await env.DB.prepare(`
       SELECT id, temporary_key FROM upload_sessions
        WHERE temporary_deleted_at IS NULL AND expires_at < unixepoch() LIMIT 500
@@ -132,6 +134,7 @@ async function executeJob(env: Env, job: PendingJob): Promise<void> {
           .bind(row.id).run();
       }
     }
+    await processRetentionCleanup(env);
     return;
   }
   throw new Error(`Job handler not implemented for ${job.kind}`);

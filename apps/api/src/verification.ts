@@ -54,6 +54,10 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
     return;
   }
 
+  const deleting = await env.DB.prepare("SELECT 1 AS found FROM images WHERE organization_id = ? AND sha256 = ? AND reference_state = 'deleting'")
+    .bind(upload.organization_id, actualHash).first();
+  if (deleting) throw new Error("Canonical image deletion is in progress; verification will retry");
+
   const canonicalKey = `org/${upload.organization_id}/sha256/${actualHash.slice(0, 2)}/${actualHash}.png`;
   await env.IMAGES.put(canonicalKey, bytes, {
     httpMetadata: { contentType: "image/png" },
