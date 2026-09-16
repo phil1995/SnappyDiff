@@ -61,6 +61,22 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
 
   const imageId = randomId("img");
   const canonicalKey = `org/${upload.organization_id}/sha256/${actualHash.slice(0, 2)}/${actualHash}-${imageId}.png`;
+  await env.DB.prepare(`
+    INSERT INTO image_publications (organization_id, sha256, image_id, r2_key, byte_size, width, height)
+    SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (
+      SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ? AND reference_state = 'active'
+    ) ON CONFLICT (organization_id, sha256) DO NOTHING
+  `).bind(upload.organization_id, actualHash, imageId, canonicalKey, upload.expected_bytes,
+    dimensions.width, dimensions.height, upload.organization_id, actualHash).run();
+  const publication = await env.DB.prepare(`
+    SELECT image_id, r2_key FROM image_publications WHERE organization_id = ? AND sha256 = ?
+  `).bind(upload.organization_id, actualHash).first<{ image_id: string; r2_key: string }>();
+  if (publication) {
+    await env.IMAGES.put(publication.r2_key, bytes, {
+      httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: actualHash },
+      onlyIf: { etagDoesNotMatch: "*" },
+    });
+  }
   await env.DB.batch([
     env.DB.prepare(`
       UPDATE organization_usage SET
@@ -75,12 +91,13 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
       upload.organization_id, upload.id, upload.organization_id, payload.objectVersion),
     env.DB.prepare(`
       INSERT INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
-      SELECT ?, ?, ?, ?, 'image/png', ?, ?, ? WHERE EXISTS (
-        SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
-          AND state = 'verifying' AND object_version = ?
-      ) ON CONFLICT (organization_id, sha256) DO NOTHING
-    `).bind(imageId, upload.organization_id, actualHash, canonicalKey, upload.expected_bytes, dimensions.width, dimensions.height,
-      upload.id, upload.organization_id, payload.objectVersion),
+      SELECT p.image_id, p.organization_id, p.sha256, p.r2_key, p.content_type, p.byte_size, p.width, p.height
+        FROM image_publications p
+       WHERE p.organization_id = ? AND p.sha256 = ? AND EXISTS (
+         SELECT 1 FROM upload_sessions WHERE id = ? AND organization_id = ?
+           AND state = 'verifying' AND object_version = ?
+       ) ON CONFLICT (organization_id, sha256) DO NOTHING
+    `).bind(upload.organization_id, actualHash, upload.id, upload.organization_id, payload.objectVersion),
     env.DB.prepare(`
       UPDATE manifest_entries SET image_id = (
         SELECT id FROM images WHERE organization_id = ? AND sha256 = ? AND reference_state = 'active'
@@ -105,6 +122,9 @@ export async function verifyUploadJob(env: Env, job: PendingJob): Promise<void> 
     env.DB.prepare(`UPDATE upload_sessions SET reservation_released_at = unixepoch(), updated_at = unixepoch()
       WHERE id = ? AND organization_id = ? AND state = 'published' AND object_version = ?
         AND reservation_released_at IS NULL`).bind(upload.id, upload.organization_id, payload.objectVersion),
+    env.DB.prepare(`DELETE FROM image_publications WHERE organization_id = ? AND sha256 = ?
+      AND EXISTS (SELECT 1 FROM images WHERE organization_id = ? AND sha256 = ? AND reference_state = 'active')`)
+      .bind(upload.organization_id, actualHash, upload.organization_id, actualHash),
   ]);
   const published = await env.DB.prepare(`SELECT 1 AS found FROM upload_sessions
     WHERE id = ? AND organization_id = ? AND state = 'published' AND object_version = ?`)
