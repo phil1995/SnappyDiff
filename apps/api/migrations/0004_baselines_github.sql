@@ -9,13 +9,13 @@ CREATE UNIQUE INDEX github_repository_installation_owner
 CREATE TRIGGER commit_edges_reject_completed_graph_changes
 BEFORE INSERT ON commit_edges
 BEGIN
-  SELECT CASE WHEN EXISTS (
+  SELECT (CASE WHEN EXISTS (
     SELECT 1 FROM commits c WHERE c.organization_id = NEW.organization_id AND c.project_id = NEW.project_id
       AND c.sha = NEW.child_sha AND c.parents_complete = 1
   ) AND NOT EXISTS (
     SELECT 1 FROM commit_edges e WHERE e.organization_id = NEW.organization_id AND e.project_id = NEW.project_id
       AND e.child_sha = NEW.child_sha AND e.parent_sha = NEW.parent_sha
-  ) THEN RAISE(ABORT, 'commit_graph_immutable') END;
+  ) THEN RAISE(ABORT, 'commit_graph_immutable') END);
 END;
 
 CREATE TABLE comparison_entries (

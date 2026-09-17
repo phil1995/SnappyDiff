@@ -22,7 +22,7 @@ ALTER TABLE shard_finalizations ADD COLUMN lease_expires_at INTEGER;
 CREATE TRIGGER manifest_pages_require_open_shard
 BEFORE INSERT ON manifest_pages
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT (CASE WHEN NOT EXISTS (
     SELECT 1 FROM run_shards s JOIN runs r ON r.id = s.run_id AND r.organization_id = s.organization_id
      WHERE s.id = NEW.shard_id AND s.organization_id = NEW.organization_id AND s.run_id = NEW.run_id
        AND s.state = 'open' AND r.state = 'open' AND r.deadline_at > unixepoch()
@@ -30,13 +30,13 @@ BEGIN
          SELECT 1 FROM shard_finalizations f
           WHERE f.organization_id = NEW.organization_id AND f.shard_id = NEW.shard_id
        )
-  ) THEN RAISE(ABORT, 'shard_not_open') END;
+  ) THEN RAISE(ABORT, 'shard_not_open') END);
 END;
 
 CREATE TRIGGER manifest_entries_require_open_shard
 BEFORE INSERT ON manifest_entries
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
+  SELECT (CASE WHEN NOT EXISTS (
     SELECT 1 FROM run_shards s JOIN runs r ON r.id = s.run_id AND r.organization_id = s.organization_id
      WHERE s.id = NEW.shard_id AND s.organization_id = NEW.organization_id AND s.run_id = NEW.run_id
        AND s.state = 'open' AND r.state = 'open' AND r.deadline_at > unixepoch()
@@ -44,5 +44,5 @@ BEGIN
          SELECT 1 FROM shard_finalizations f
           WHERE f.organization_id = NEW.organization_id AND f.shard_id = NEW.shard_id
        )
-  ) THEN RAISE(ABORT, 'shard_not_open') END;
+  ) THEN RAISE(ABORT, 'shard_not_open') END);
 END;
