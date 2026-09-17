@@ -15,6 +15,15 @@ Use separate `local`, `staging`, and `production` resources. Never reuse a D1 da
 5. Apply D1 migrations, deploy staging, and complete the provider gates.
 6. Promote the same tested commit to production through the CI deployment environment.
 
+The `/health` endpoint is a liveness check only. It does not prove that migrations or provider
+credentials are present. Treat an environment as ready only after migrations have completed,
+configuration validation passes with `--require-secrets`, and the provider gates are recorded.
+
+For an infrastructure-only bootstrap, use an ignored local Wrangler override containing the
+account-specific D1 IDs and R2 names. Do not enable cron triggers or customer traffic during this
+phase. After the schema and secrets are ready, deploy the canonical tracked configuration so that
+Wrangler remains the source of truth.
+
 ## Required secrets
 
 - `WORKOS_API_KEY`
@@ -22,6 +31,7 @@ Use separate `local`, `staging`, and `production` resources. Never reuse a D1 da
 - `WORKOS_COOKIE_PASSWORD` (at least 32 random bytes)
 - `GITHUB_APP_PRIVATE_KEY`
 - `GITHUB_WEBHOOK_SECRET`
+- `GITHUB_OAUTH_CLIENT_SECRET`
 - `TOKEN_PEPPER` (at least 32 random bytes)
 - `R2_ACCESS_KEY_ID` (staging/production direct uploads)
 - `R2_SECRET_ACCESS_KEY` (staging/production direct uploads)
