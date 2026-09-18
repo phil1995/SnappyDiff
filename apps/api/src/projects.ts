@@ -72,11 +72,14 @@ export async function resolveOrCreateRepositoryProject(
     if (!project) throw new HttpError(409, "project_conflict", "The repository conflicts with an existing project");
   } else {
     try {
-      await env.DB.prepare(`UPDATE projects SET repository_owner = ?, repository_name = ?,
+      await env.DB.prepare(`UPDATE projects SET
+        repository_owner = CASE WHEN ? IS NULL THEN repository_owner ELSE ? END,
+        repository_name = CASE WHEN ? IS NULL THEN repository_name ELSE ? END,
         github_repository_id = COALESCE(?, github_repository_id),
         default_branch = CASE WHEN ? IS NULL THEN default_branch ELSE ? END, deleted_at = NULL,
         updated_at = unixepoch() WHERE id = ? AND organization_id = ?`)
-        .bind(input.repositoryOwner, input.repositoryName, input.githubRepositoryId ?? null,
+        .bind(input.githubRepositoryId ?? null, input.repositoryOwner,
+          input.githubRepositoryId ?? null, input.repositoryName, input.githubRepositoryId ?? null,
           input.defaultBranch ?? null, input.defaultBranch ?? null, project.id, organizationId).run();
     } catch (error) {
       if (String(error).includes("UNIQUE")) {

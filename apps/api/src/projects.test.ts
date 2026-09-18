@@ -40,7 +40,7 @@ describe("upload-first projects", () => {
     assert.equal(second.created, false);
     assert.equal(second.id, first.id);
     assert.equal(suiteWrites, 2, "suite creation stays idempotent at the database constraint");
-    assert.deepEqual(updateValues.slice(3, 5), [null, null], "an upload without branch metadata preserves project settings");
+    assert.deepEqual(updateValues.slice(5, 7), [null, null], "an upload without branch metadata preserves project settings");
   });
 
   it("rejects malformed repository identities before storage access", async () => {
@@ -76,15 +76,30 @@ describe("upload-first projects", () => {
       && error.code === "repository_identity_conflict");
   });
 
-  it("enforces case-insensitive repository uniqueness in the schema", () => {
+  it("reconciles pre-existing case variants before enforcing normalized uniqueness", () => {
     const database = new DatabaseSync(":memory:");
-    database.exec(`CREATE TABLE projects (
-      id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, repository_owner TEXT NOT NULL, repository_name TEXT NOT NULL
-    ) STRICT;`);
+    database.exec(readFileSync(new URL("../migrations/0001_initial.sql", import.meta.url), "utf8"));
+    database.exec(readFileSync(new URL("../migrations/0012_github_repository_identity.sql", import.meta.url), "utf8"));
+    database.prepare("INSERT INTO organizations (id, workos_organization_id, name, slug) VALUES (?, ?, ?, ?)")
+      .run("org_1", "workos_1", "Test", "test");
+    database.prepare(`INSERT INTO projects
+      (id, organization_id, name, slug, repository_owner, repository_name, default_branch)
+      VALUES (?, 'org_1', ?, ?, ?, ?, 'main')`).run("prj_1", "One", "one", "Owner", "Repo");
+    database.prepare(`INSERT INTO projects
+      (id, organization_id, name, slug, repository_owner, repository_name, default_branch)
+      VALUES (?, 'org_1', ?, ?, ?, ?, 'main')`).run("prj_2", "Two", "two", "owner", "repo");
+    database.prepare("INSERT INTO suites (id, organization_id, project_id, name) VALUES (?, 'org_1', ?, 'default')")
+      .run("ste_1", "prj_1");
+    database.prepare("INSERT INTO suites (id, organization_id, project_id, name) VALUES (?, 'org_1', ?, 'default')")
+      .run("ste_2", "prj_2");
     database.exec(readFileSync(new URL("../migrations/0013_normalized_repository_identity.sql", import.meta.url), "utf8"));
-    database.prepare("INSERT INTO projects VALUES (?, ?, ?, ?)").run("prj_1", "org_1", "Owner", "Repo");
-    assert.throws(() => database.prepare("INSERT INTO projects VALUES (?, ?, ?, ?)")
-      .run("prj_2", "org_1", "owner", "repo"), /UNIQUE/);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM projects").get()?.count, 2);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM suites").get()?.count, 2);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM repository_identity_migration_conflicts").get()?.count, 1);
+    assert.match(String(database.prepare("SELECT repository_name FROM projects WHERE id = 'prj_2'").get()?.repository_name), /legacy/);
+    assert.throws(() => database.prepare(`INSERT INTO projects
+      (id, organization_id, name, slug, repository_owner, repository_name, default_branch)
+      VALUES ('prj_3', 'org_1', 'Three', 'three', 'OWNER', 'REPO', 'main')`).run(), /UNIQUE/);
   });
 
   it("keeps renamed and name-reused GitHub repositories distinct against the real schema", async () => {
@@ -112,6 +127,12 @@ describe("upload-first projects", () => {
     const original = await resolveOrCreateRepositoryProject(environment, "org_1", {
       repositoryOwner: "owner", repositoryName: "original", githubRepositoryId: 101, defaultBranch: "main",
     });
+    const differentlyCased = await resolveOrCreateRepositoryProject(environment, "org_1", {
+      repositoryOwner: "OWNER", repositoryName: "ORIGINAL",
+    });
+    assert.equal(differentlyCased.id, original.id);
+    assert.deepEqual({ ...database.prepare("SELECT repository_owner, repository_name FROM projects WHERE id = ?").get(original.id) },
+      { repository_owner: "owner", repository_name: "original" });
     const renamed = await resolveOrCreateRepositoryProject(environment, "org_1", {
       repositoryOwner: "owner", repositoryName: "renamed", githubRepositoryId: 101, defaultBranch: "main",
     });
