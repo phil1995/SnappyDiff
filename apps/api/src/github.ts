@@ -243,7 +243,7 @@ export async function completeGitHubOnboarding(
   }
 
   const userToken = await exchangeGitHubUserToken(env, body.code);
-  const repositories: GitHubRepository[] = [];
+  const administeredRepositories = new Set<string>();
   for (let page = 1; page <= 10; page++) {
     const response = await fetch(`https://api.github.com/user/installations/${Number(installationId)}/repositories?per_page=100&page=${page}`, {
       headers: githubHeaders(userToken), signal: AbortSignal.timeout(30_000),
@@ -251,50 +251,81 @@ export async function completeGitHubOnboarding(
     if (!response.ok) throw new HttpError(403, "installation_ownership_failed", "Your GitHub account cannot administer this installation");
     const payload = await response.json() as { repositories?: GitHubRepository[] };
     const pageRepositories = payload.repositories ?? [];
-    repositories.push(...pageRepositories.filter((repository) => repository.permissions?.admin === true));
+    for (const repository of pageRepositories) {
+      if (repository.permissions?.admin === true) administeredRepositories.add(repositoryKey(repository));
+    }
     if (pageRepositories.length < 100) break;
-    if (page === 10) throw new HttpError(422, "too_many_repositories", "Select fewer than 1,000 repositories for one SnappyDiff installation");
+    if (page === 10) throw new HttpError(422, "too_many_repositories", "Connect fewer than 1,000 repositories in one SnappyDiff installation");
   }
-  if (repositories.length === 0) {
+  if (administeredRepositories.size === 0) {
     throw new HttpError(403, "repository_administration_required", "Select at least one repository that you administer");
   }
 
-  const claimed = await env.DB.prepare("SELECT organization_id FROM github_installations WHERE installation_id = ? LIMIT 1")
-    .bind(Number(installationId)).first<{ organization_id: string }>();
-  if (claimed && claimed.organization_id !== session.organizationId) {
-    throw new HttpError(409, "installation_already_linked", "This GitHub installation is already linked to another SnappyDiff workspace");
+  const installedRepositories: GitHubRepository[] = [];
+  try {
+    for (let page = 1; page <= 10; page++) {
+      const payload = await githubRequest<{ repositories?: GitHubRepository[] }>(env,
+        `/installation/repositories?per_page=100&page=${page}`, {}, Number(installationId));
+      const pageRepositories = payload.repositories ?? [];
+      installedRepositories.push(...pageRepositories);
+      if (pageRepositories.length < 100) break;
+      if (page === 10) throw new HttpError(422, "too_many_repositories", "Connect fewer than 1,000 repositories in one SnappyDiff installation");
+    }
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(403, "installation_ownership_failed", "The installation does not belong to this GitHub App");
   }
+  const installedKeys = new Set(installedRepositories.map(repositoryKey));
+  const repositories = installedRepositories.filter((repository) => administeredRepositories.has(repositoryKey(repository)));
+  if (repositories.length === 0) throw new HttpError(403, "repository_administration_required", "Select at least one repository that you administer");
+
   const existing = await env.DB.prepare(`
-    SELECT id, name, slug, repository_owner, repository_name FROM projects WHERE organization_id = ?
-  `).bind(session.organizationId).all<{ id: string; name: string; slug: string; repository_owner: string; repository_name: string }>();
+    SELECT id, name, slug, repository_owner, repository_name, github_repository_id
+      FROM projects WHERE organization_id = ?
+  `).bind(session.organizationId).all<{
+    id: string; name: string; slug: string; repository_owner: string; repository_name: string; github_repository_id: number | null;
+  }>();
+  const byRepositoryId = new Map((existing.results ?? []).filter((project) => project.github_repository_id !== null)
+    .map((project) => [project.github_repository_id, project]));
   const byRepository = new Map((existing.results ?? []).map((project) => [
     `${project.repository_owner.toLowerCase()}/${project.repository_name.toLowerCase()}`, project,
   ]));
   const usedSlugs = new Set((existing.results ?? []).map((project) => project.slug));
-  const statements = [env.DB.prepare(`
-    UPDATE github_installations SET suspended_at = unixepoch(), updated_at = unixepoch()
+  const existingMappings = await env.DB.prepare(`
+    SELECT repository_owner, repository_name FROM github_installations
      WHERE organization_id = ? AND installation_id = ?
-  `).bind(session.organizationId, Number(installationId))];
+  `).bind(session.organizationId, Number(installationId)).all<{ repository_owner: string; repository_name: string }>();
+  const statements = [env.DB.prepare(`
+    INSERT INTO github_installation_owners (installation_id, organization_id, account_login)
+    VALUES (?, ?, ?) ON CONFLICT (installation_id) DO UPDATE SET
+      organization_id = excluded.organization_id, account_login = excluded.account_login, updated_at = unixepoch()
+  `).bind(Number(installationId), session.organizationId, installedRepositories[0]!.owner.login)];
+  for (const mapping of existingMappings.results ?? []) {
+    const installed = installedKeys.has(`${mapping.repository_owner.toLowerCase()}/${mapping.repository_name.toLowerCase()}`);
+    statements.push(env.DB.prepare(`
+      UPDATE github_installations SET suspended_at = ${installed ? "NULL" : "unixepoch()"}, updated_at = unixepoch()
+       WHERE organization_id = ? AND installation_id = ? AND repository_owner = ? AND repository_name = ?
+    `).bind(session.organizationId, Number(installationId), mapping.repository_owner, mapping.repository_name));
+  }
   const projects: Array<{ id: string; name: string; repositoryOwner: string; repositoryName: string; defaultBranch: string; created: boolean }> = [];
   for (const repository of repositories) {
-    const key = `${repository.owner.login.toLowerCase()}/${repository.name.toLowerCase()}`;
-    const prior = byRepository.get(key);
+    const prior = byRepositoryId.get(repository.id) ?? byRepository.get(repositoryKey(repository));
     const projectId = prior?.id ?? randomId("prj");
     if (prior) {
       statements.push(env.DB.prepare(`
         UPDATE projects SET repository_owner = ?, repository_name = ?, deleted_at = NULL,
-          default_branch = ?, updated_at = unixepoch()
+          github_repository_id = ?, default_branch = ?, updated_at = unixepoch()
          WHERE id = ? AND organization_id = ?
-      `).bind(repository.owner.login, repository.name, repository.default_branch, projectId, session.organizationId));
+      `).bind(repository.owner.login, repository.name, repository.id, repository.default_branch, projectId, session.organizationId));
     } else {
       let slug = githubProjectSlug(repository.name, repository.id);
       if (usedSlugs.has(slug)) slug = `repository-${projectId.slice(-12)}`;
       usedSlugs.add(slug);
       statements.push(
         env.DB.prepare(`INSERT INTO projects
-          (id, organization_id, name, slug, repository_owner, repository_name, default_branch)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .bind(projectId, session.organizationId, repository.name, slug, repository.owner.login, repository.name, repository.default_branch),
+          (id, organization_id, name, slug, repository_owner, repository_name, github_repository_id, default_branch)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+          .bind(projectId, session.organizationId, repository.name, slug, repository.owner.login, repository.name, repository.id, repository.default_branch),
         env.DB.prepare("INSERT INTO suites (id, organization_id, project_id, name, is_system_default) VALUES (?, ?, ?, 'default', 1)")
           .bind(randomId("ste"), session.organizationId, projectId),
       );
@@ -314,10 +345,17 @@ export async function completeGitHubOnboarding(
     JSON.stringify({ repositoryCount: repositories.length, createdProjectCount: projects.filter((project) => project.created).length })));
   try { await env.DB.batch(statements); }
   catch (error) {
+    if (String(error).includes("github_installation_already_linked")) {
+      throw new HttpError(409, "installation_already_linked", "This GitHub installation is already linked to another SnappyDiff workspace");
+    }
     if (String(error).includes("UNIQUE")) throw new HttpError(409, "github_sync_conflict", "One of these repositories is already connected elsewhere");
     throw error;
   }
   return json({ installationId: Number(installationId), projects });
+}
+
+function repositoryKey(repository: Pick<GitHubRepository, "owner" | "name">): string {
+  return `${repository.owner.login.toLowerCase()}/${repository.name.toLowerCase()}`;
 }
 
 export async function classifyPullRequestFork(
@@ -600,6 +638,11 @@ export async function linkGitHubInstallation(
   try {
     await env.DB.batch([
     env.DB.prepare(`
+      INSERT INTO github_installation_owners (installation_id, organization_id, account_login)
+      VALUES (?, ?, ?) ON CONFLICT (installation_id) DO UPDATE SET
+        organization_id = excluded.organization_id, account_login = excluded.account_login, updated_at = unixepoch()
+    `).bind(installationId, session.organizationId, project.repository_owner),
+    env.DB.prepare(`
       INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)
       DO UPDATE SET suspended_at = NULL, updated_at = unixepoch()
@@ -610,6 +653,9 @@ export async function linkGitHubInstallation(
     `).bind(randomId("aud"), session.organizationId, session.userId, projectId, context.requestId, JSON.stringify({ installationId })),
     ]);
   } catch (error) {
+    if (String(error).includes("github_installation_already_linked")) {
+      throw new HttpError(409, "installation_already_linked", "This GitHub installation is already linked to another organization");
+    }
     if (String(error).includes("UNIQUE")) {
       throw new HttpError(409, "installation_already_linked", "This GitHub installation repository is already linked to another organization");
     }

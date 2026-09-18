@@ -39,3 +39,10 @@ export function projectSetupPath(projectId, requestGeneration, currentGeneration
   if (requestGeneration !== currentGeneration) return null;
   return `/projects/${encodeURIComponent(projectId)}/setup`;
 }
+
+export function setProjectFormError(form, message = null) {
+  const element = form?.querySelector?.("[data-project-error]");
+  if (!element) return;
+  element.hidden = message === null;
+  if (message !== null) element.textContent = String(message);
+}

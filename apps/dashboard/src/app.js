@@ -1,4 +1,4 @@
-import { parseGitHubRepository, projectSetupPath, projectSlug } from "./project-form.js";
+import { parseGitHubRepository, projectSetupPath, projectSlug, setProjectFormError } from "./project-form.js";
 
 const root = document.querySelector("#app");
 const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, swipe: .5, blinkTimer: null, worker: null, viewerGeneration: 0, routeGeneration: 0, comparisonId: null };
@@ -103,7 +103,7 @@ async function renderHome(routeGeneration) {
 
 function renderNewProject(routeGeneration) {
   if (state.me.user.role !== "admin") throw new Error("Only workspace administrators can create projects.");
-  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Connect GitHub</span></nav><section class="onboarding"><div class="onboarding-copy"><span class="eyebrow">Repository setup</span><h1>Connect GitHub once.</h1><p>Select one or more repositories on GitHub. SnappyDiff creates the matching projects, reads their default branches, and enables pull request checks automatically.</p><ol class="setup-steps"><li><span>1</span><div><strong>Choose repositories</strong><small>GitHub shows exactly what the App can access.</small></div></li><li><span>2</span><div><strong>Projects appear here</strong><small>No names, URLs, branches, or installation IDs to copy.</small></div></li><li><span>3</span><div><strong>Add the CI step</strong><small>SnappyDiff gives you configuration for the connected project.</small></div></li></ol></div><div class="project-form connect-card"><div class="github-mark" aria-hidden="true">GH</div><h2>Install the SnappyDiff GitHub App</h2><p>GitHub will ask which account and repositories you want to connect. You can change the selection later.</p><div class="form-error" data-github-error role="alert" hidden></div><button class="button primary connect-button" data-github-connect>Choose repositories on GitHub</button><p class="privacy-note">SnappyDiff receives repository metadata and check events. It does not read your source files.</p><details><summary>Connect without the GitHub App</summary><form data-project-create><label>Project name<input name="name" maxlength="100" required placeholder="My iOS App"></label><label>GitHub repository<input name="repository" required autocomplete="off" spellcheck="false" placeholder="owner/repository"></label><label>Default branch<input name="defaultBranch" maxlength="255" required value="main" spellcheck="false"></label><button class="button" type="submit">Create manual project</button></form></details></div></section>`);
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Connect GitHub</span></nav><section class="onboarding"><div class="onboarding-copy"><span class="eyebrow">Repository setup</span><h1>Connect GitHub once.</h1><p>Select one or more repositories on GitHub. SnappyDiff creates the matching projects, reads their default branches, and enables pull request checks automatically.</p><ol class="setup-steps"><li><span>1</span><div><strong>Choose repositories</strong><small>GitHub shows exactly what the App can access.</small></div></li><li><span>2</span><div><strong>Projects appear here</strong><small>No names, URLs, branches, or installation IDs to copy.</small></div></li><li><span>3</span><div><strong>Add the CI step</strong><small>SnappyDiff gives you configuration for the connected project.</small></div></li></ol></div><div class="project-form connect-card"><div class="github-mark" aria-hidden="true">GH</div><h2>Install the SnappyDiff GitHub App</h2><p>GitHub will ask which account and repositories you want to connect. You can change the selection later.</p><div class="form-error" data-github-error role="alert" hidden></div><button class="button primary connect-button" data-github-connect>Choose repositories on GitHub</button><p class="privacy-note">SnappyDiff receives repository metadata and check events. It does not read your source files.</p><details><summary>Connect without the GitHub App</summary><form data-project-create><label>Project name<input name="name" maxlength="100" required placeholder="My iOS App"></label><label>GitHub repository<input name="repository" required autocomplete="off" spellcheck="false" placeholder="owner/repository"></label><label>Default branch<input name="defaultBranch" maxlength="255" required value="main" spellcheck="false"></label><div class="form-error" data-project-error role="alert" hidden></div><button class="button" type="submit">Create manual project</button></form></details></div></section>`);
   root.querySelector("[data-github-connect]").addEventListener("click", async (event) => {
     const button = event.currentTarget;
     const error = root.querySelector("[data-github-error]");
@@ -128,8 +128,7 @@ function renderNewProject(routeGeneration) {
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = event.submitter;
-    const error = form.querySelector("[data-project-error]");
-    error.hidden = true;
+    setProjectFormError(form);
     button.disabled = true;
     button.textContent = "Creating…";
     try {
@@ -148,8 +147,7 @@ function renderNewProject(routeGeneration) {
       const destination = projectSetupPath(result.project.id, routeGeneration, state.routeGeneration);
       if (destination) navigate(destination, true);
     } catch (failure) {
-      error.textContent = failure.message;
-      error.hidden = false;
+      setProjectFormError(form, failure.message);
       button.disabled = false;
       button.textContent = "Create project";
     }
