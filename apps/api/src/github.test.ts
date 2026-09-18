@@ -49,16 +49,14 @@ class FakeStatement {
   private readonly database: FakeDatabase;
   constructor(query: string, database: FakeDatabase) { this.query = query; this.database = database; }
   bind(...values: unknown[]): this { this.values = values; return this; }
-  async first<T>(): Promise<T | null> {
-    if (this.query.includes("FROM github_installation_owners")) return this.database.installationOwner as T | null;
-    return null;
-  }
+  async first<T>(): Promise<T | null> { return null; }
   async all<T>(): Promise<{ success: boolean; results: T[] }> {
     if (this.query.includes("FROM projects WHERE organization_id")) return { success: true, results: this.database.projects as T[] };
     if (this.query.includes("FROM github_installations")) return { success: true, results: this.database.mappings as T[] };
     return { success: true, results: [] };
   }
   async run<T>(): Promise<{ success: boolean; results: T[]; meta: { changes: number } }> {
+    this.database.runStatements.push(this);
     return { success: true, results: [], meta: { changes: 1 } };
   }
   async raw<T>(): Promise<T[]> { return []; }
@@ -70,7 +68,7 @@ class FakeDatabase {
   batchError: Error | null = null;
   projects: unknown[] = [];
   mappings: unknown[] = [];
-  installationOwner: unknown = null;
+  runStatements: FakeStatement[] = [];
   prepare(query: string): FakeStatement { const statement = new FakeStatement(query, this); this.statements.push(statement); return statement; }
   async batch<T>(statements: FakeStatement[]): Promise<Array<{ success: boolean; results: T[] }>> {
     this.batchStatements = statements;
@@ -149,6 +147,8 @@ describe("GitHub-first onboarding", () => {
       const sharedMapping = database.batchStatements.find((statement) => statement.values.at(-1) === "shared"
         && statement.query.includes("UPDATE github_installations"));
       assert.match(sharedMapping?.query ?? "", /suspended_at = NULL/);
+      assert.equal(database.batchStatements.some((statement) => statement.query.includes("INSERT INTO github_installations")
+        && statement.values.at(-1) === "shared"), false, "OAuth sync must not provision a repository the user cannot administer");
       assert.ok(database.batchStatements[0]?.query.includes("github_installation_owners"));
       const firstProjectWrite = database.batchStatements.findIndex((statement) => statement.query.includes("UPDATE projects SET"));
       const firstProjectInsert = database.batchStatements.findIndex((statement) => statement.query.includes("INSERT INTO projects"));
@@ -173,37 +173,33 @@ describe("GitHub-first onboarding", () => {
     } finally { globalThis.fetch = originalFetch; }
   });
 
-  it("provisions newly selected repositories from the signed GitHub webhook", async () => {
+  it("revokes a removed repository without depending on GitHub inventory", async () => {
     const database = new FakeDatabase();
-    database.installationOwner = { organization_id: "org_1" };
-    database.projects = [
-      { id: "prj_existing", name: "Renamed", slug: "renamed", repository_owner: "owner", repository_name: "renamed", github_repository_id: 101 },
-    ];
     const environment = { ...githubEnvironment, DB: database, GITHUB_WEBHOOK_SECRET: "webhook-secret" } as unknown as Env;
     const payload = encoder.encode(JSON.stringify({
-      action: "added",
+      action: "removed",
       installation: { id: 77 },
-      repositories_added: [{ id: 202, name: "shared", owner: { login: "owner" } }],
-      repositories_removed: [],
+      repositories_added: [],
+      repositories_removed: [{ id: 202, name: "shared", owner: { login: "owner" } }],
     }));
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = githubFetchFixture();
+    globalThis.fetch = (async () => { throw new Error("GitHub inventory unavailable"); }) as typeof fetch;
     try {
       const response = await handleGitHubWebhook(new Request("https://example.test/webhooks/github", {
         method: "POST",
         headers: {
-          "x-github-delivery": "delivery_repo_added",
+          "x-github-delivery": "delivery_repo_removed",
           "x-github-event": "installation_repositories",
           "x-hub-signature-256": await signature(payload, "webhook-secret"),
         },
         body: payload,
       }), environment);
       assert.equal(response.status, 200);
-      assert.equal(database.batchStatements.filter((statement) => statement.query.includes("INSERT INTO projects")).length, 2);
-      assert.equal(database.batchStatements.filter((statement) => statement.query.includes("INSERT INTO github_installations")).length, 3);
-      assert.ok(database.batchStatements.some((statement) => statement.query.includes("github.installation_webhook_synced")));
+      const removal = database.runStatements.find((statement) => statement.query.includes("UPDATE github_installations SET suspended_at"));
+      assert.deepEqual(removal?.values, [77, "owner", "shared"]);
     } finally { globalThis.fetch = originalFetch; }
   });
+
 });
 
 describe("GitHub identity migration", () => {

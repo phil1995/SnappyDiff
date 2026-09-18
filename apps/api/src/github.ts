@@ -370,91 +370,6 @@ function repositoryKey(repository: Pick<GitHubRepository, "owner" | "name">): st
   return `${repository.owner.login.toLowerCase()}/${repository.name.toLowerCase()}`;
 }
 
-async function listInstallationRepositories(env: Env, installationId: number): Promise<GitHubRepository[]> {
-  const repositories: GitHubRepository[] = [];
-  for (let page = 1; page <= 10; page++) {
-    const payload = await githubRequest<{ repositories?: GitHubRepository[] }>(env,
-      `/installation/repositories?per_page=100&page=${page}`, {}, installationId);
-    const pageRepositories = payload.repositories ?? [];
-    repositories.push(...pageRepositories);
-    if (pageRepositories.length < 100) return repositories;
-  }
-  throw new HttpError(422, "too_many_repositories", "Connect fewer than 1,000 repositories in one SnappyDiff installation");
-}
-
-async function syncInstallationRepositoriesFromWebhook(
-  env: Env,
-  installationId: number,
-  delivery: string,
-): Promise<void> {
-  const owner = await env.DB.prepare(`
-    SELECT organization_id FROM github_installation_owners WHERE installation_id = ?
-  `).bind(installationId).first<{ organization_id: string }>();
-  if (!owner) return;
-  const repositories = await listInstallationRepositories(env, installationId);
-  const existing = await env.DB.prepare(`
-    SELECT id, name, slug, repository_owner, repository_name, github_repository_id
-      FROM projects WHERE organization_id = ?
-  `).bind(owner.organization_id).all<{
-    id: string; name: string; slug: string; repository_owner: string; repository_name: string; github_repository_id: number | null;
-  }>();
-  const byRepositoryId = new Map((existing.results ?? []).filter((project) => project.github_repository_id !== null)
-    .map((project) => [project.github_repository_id, project]));
-  const unidentifiedByRepository = new Map((existing.results ?? []).filter((project) => project.github_repository_id === null)
-    .map((project) => [`${project.repository_owner.toLowerCase()}/${project.repository_name.toLowerCase()}`, project]));
-  const usedSlugs = new Set((existing.results ?? []).map((project) => project.slug));
-  const claimedProjectIds = new Set<string>();
-  const plans = repositories.map((repository) => {
-    const prior = byRepositoryId.get(repository.id) ?? unidentifiedByRepository.get(repositoryKey(repository));
-    if (prior && claimedProjectIds.has(prior.id)) {
-      throw new HttpError(409, "github_identity_conflict", "GitHub returned conflicting repository identities");
-    }
-    if (prior) claimedProjectIds.add(prior.id);
-    return { repository, prior, projectId: prior?.id ?? randomId("prj") };
-  });
-  const statements = [env.DB.prepare(`
-    UPDATE github_installations SET suspended_at = unixepoch(), updated_at = unixepoch()
-     WHERE organization_id = ? AND installation_id = ?
-  `).bind(owner.organization_id, installationId)];
-  for (const { repository, prior, projectId } of plans) {
-    if (!prior) continue;
-    statements.push(env.DB.prepare(`
-      UPDATE projects SET repository_owner = ?, repository_name = ?, deleted_at = NULL,
-        github_repository_id = ?, default_branch = ?, updated_at = unixepoch()
-       WHERE id = ? AND organization_id = ?
-    `).bind(repository.owner.login, repository.name, repository.id, repository.default_branch, projectId, owner.organization_id));
-  }
-  for (const { repository, prior, projectId } of plans) {
-    if (prior) continue;
-    let slug = githubProjectSlug(repository.name, repository.id);
-    if (usedSlugs.has(slug)) slug = `repository-${projectId.slice(-12)}`;
-    usedSlugs.add(slug);
-    statements.push(
-      env.DB.prepare(`INSERT INTO projects
-        (id, organization_id, name, slug, repository_owner, repository_name, github_repository_id, default_branch)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .bind(projectId, owner.organization_id, repository.name, slug, repository.owner.login, repository.name,
-          repository.id, repository.default_branch),
-      env.DB.prepare("INSERT INTO suites (id, organization_id, project_id, name, is_system_default) VALUES (?, ?, ?, 'default', 1)")
-        .bind(randomId("ste"), owner.organization_id, projectId),
-    );
-  }
-  for (const { repository } of plans) {
-    statements.push(env.DB.prepare(`
-      INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)
-      DO UPDATE SET account_login = excluded.account_login, suspended_at = NULL, updated_at = unixepoch()
-    `).bind(randomId("ghi"), owner.organization_id, installationId, repository.owner.login,
-      repository.owner.login, repository.name));
-  }
-  statements.push(env.DB.prepare(`
-    INSERT INTO audit_events (id, organization_id, action, target_type, target_id, request_id, metadata_json)
-    VALUES (?, ?, 'github.installation_webhook_synced', 'github_installation', ?, ?, ?)
-  `).bind(randomId("aud"), owner.organization_id, String(installationId), delivery,
-    JSON.stringify({ repositoryCount: repositories.length, createdProjectCount: plans.filter((plan) => !plan.prior).length })));
-  await env.DB.batch(statements);
-}
-
 export async function classifyPullRequestFork(
   env: Env,
   installationId: number,
@@ -665,7 +580,12 @@ export async function handleGitHubWebhook(request: Request, env: Env): Promise<R
     }
   }
   if (eventName === "installation_repositories" && payload["installation"]?.id) {
-    await syncInstallationRepositoriesFromWebhook(env, Number(payload["installation"].id), delivery);
+    for (const repository of payload["repositories_removed"] ?? []) {
+      await env.DB.prepare(`
+        UPDATE github_installations SET suspended_at = unixepoch(), updated_at = unixepoch()
+         WHERE installation_id = ? AND repository_owner = ? AND repository_name = ?
+      `).bind(Number(payload["installation"].id), String(repository.owner?.login), String(repository.name)).run();
+    }
   }
   if (eventName === "push" && payload["repository"]) {
     const installationId = Number(payload["installation"]?.id ?? 0);
