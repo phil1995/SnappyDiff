@@ -34,7 +34,7 @@ async function route() {
     if (routeGeneration !== state.routeGeneration) return;
     const path = location.pathname;
     if (path === "/github/callback") return await completeGitHubCallback(routeGeneration);
-    if (path === "/projects/new") return renderNewProject(routeGeneration);
+    if (path === "/projects/new") return await renderNewProject(routeGeneration);
     const project = path.match(/^\/projects\/([^/]+)$/);
     const projectSetup = path.match(/^\/projects\/([^/]+)\/setup$/);
     const projectSettings = path.match(/^\/projects\/([^/]+)\/settings$/);

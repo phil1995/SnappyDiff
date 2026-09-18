@@ -201,8 +201,8 @@ async fn run(cli: Cli) -> Result<()> {
             args.concurrency = args.concurrency.or(file_config.upload_concurrency);
             let (token, project) = if let Some(token) = cli.token {
                 let repository = discover_repository(&args.directory, args.repository.as_deref())?;
-                let default_branch = args.default_branch.as_deref().unwrap_or("main");
-                let exchange = workspace_token(&client, &endpoint, &token, &repository, default_branch).await?;
+                let default_branch = args.default_branch.clone().or_else(|| discover_default_branch(&args.directory));
+                let exchange = workspace_token(&client, &endpoint, &token, &repository, default_branch.as_deref()).await?;
                 (exchange.token, exchange.project_id)
             } else {
                 let exchange = github_oidc_token(&client, &endpoint, args.pull_request, file_config.oidc_audience.as_deref()).await?;
@@ -250,17 +250,20 @@ async fn workspace_token(
     endpoint: &str,
     token: &str,
     repository: &str,
-    default_branch: &str,
+    default_branch: Option<&str>,
 ) -> Result<WorkspaceExchange> {
     let (repository_owner, repository_name) = repository.split_once('/')
         .context("repository must use owner/name format")?;
+    let mut body = serde_json::json!({
+        "repositoryOwner": repository_owner,
+        "repositoryName": repository_name,
+    });
+    if let Some(default_branch) = default_branch {
+        body["defaultBranch"] = serde_json::Value::String(default_branch.to_owned());
+    }
     let response = client.post(format!("{}/api/v1/auth/workspace/exchange", endpoint.trim_end_matches('/')))
         .bearer_auth(token)
-        .json(&serde_json::json!({
-            "repositoryOwner": repository_owner,
-            "repositoryName": repository_name,
-            "defaultBranch": default_branch,
-        }))
+        .json(&body)
         .send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
@@ -291,6 +294,20 @@ fn normalize_repository(value: &str) -> Result<String> {
         bail!("repository must use owner/name format");
     }
     Ok(format!("{owner}/{name}"))
+}
+
+fn discover_default_branch(directory: &Path) -> Option<String> {
+    if let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH") {
+        if let Ok(contents) = std::fs::read_to_string(event_path) {
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&contents) {
+                if let Some(branch) = event.pointer("/repository/default_branch").and_then(|value| value.as_str()) {
+                    if !branch.is_empty() { return Some(branch.to_owned()); }
+                }
+            }
+        }
+    }
+    git_value(directory, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .and_then(|reference| reference.strip_prefix("origin/").map(ToOwned::to_owned))
 }
 
 async fn upload(api: &Api, args: UploadArgs, project: &str, json_output: bool) -> Result<()> {

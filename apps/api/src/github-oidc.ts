@@ -25,6 +25,7 @@ interface GitHubClaims {
 }
 
 interface JsonWebKeySet { keys: Array<JsonWebKey & { kid?: string }> }
+interface InstalledRepository { id: number; name: string; default_branch: string; owner: { login: string } }
 
 const cachedKeys = new Map<string, { key: CryptoKey; expiresAt: number }>();
 
@@ -167,17 +168,7 @@ async function resolveOidcProject(
     throw new HttpError(403, "workspace_binding_required", "Install the SnappyDiff GitHub App for this repository or use a workspace upload key");
   }
   await requireOrganizationWritable(env, installation.organization_id);
-  let repository: { id: number; name: string; default_branch: string; owner: { login: string } };
-  try {
-    repository = await githubRequest(env,
-      `/repos/${encodeURIComponent(repositoryOwner)}/${encodeURIComponent(repositoryName)}`, {}, installation.installation_id);
-  } catch {
-    throw new HttpError(403, "repository_binding_failed", "The GitHub App installation cannot access this repository");
-  }
-  if (repository.id !== repositoryId || repository.owner.login.toLowerCase() !== repositoryOwner.toLowerCase()
-    || repository.name.toLowerCase() !== repositoryName.toLowerCase()) {
-    throw new HttpError(403, "repository_binding_failed", "GitHub repository identity did not match the workflow token");
-  }
+  const repository = await installedRepository(env, installation.installation_id, repositoryId, repositoryOwner, repositoryName);
   const project = await resolveOrCreateRepositoryProject(env, installation.organization_id, {
     repositoryOwner: repository.owner.login,
     repositoryName: repository.name,
@@ -198,4 +189,33 @@ async function resolveOidcProject(
     .bind(randomId("ghi"), installation.organization_id, installation.installation_id, installation.account_login,
       repository.owner.login, repository.name).run();
   return project;
+}
+
+export async function installedRepository(
+  env: Env,
+  installationId: number,
+  repositoryId: number,
+  repositoryOwner: string,
+  repositoryName: string,
+): Promise<InstalledRepository> {
+  try {
+    for (let page = 1; page <= 10; page++) {
+      const payload = await githubRequest<{ repositories?: InstalledRepository[] }>(env,
+        `/installation/repositories?per_page=100&page=${page}`, {}, installationId);
+      const repositories = payload.repositories ?? [];
+      const repository = repositories.find((candidate) => candidate.id === repositoryId);
+      if (repository) {
+        if (repository.owner.login.toLowerCase() !== repositoryOwner.toLowerCase()
+          || repository.name.toLowerCase() !== repositoryName.toLowerCase()) {
+          throw new HttpError(403, "repository_binding_failed", "GitHub repository identity did not match the workflow token");
+        }
+        return repository;
+      }
+      if (repositories.length < 100) break;
+    }
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(503, "github_unavailable", "GitHub installation inventory is unavailable");
+  }
+  throw new HttpError(403, "repository_binding_failed", "The GitHub App installation has not authorized this repository");
 }

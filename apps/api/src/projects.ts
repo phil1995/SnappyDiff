@@ -9,7 +9,7 @@ const REPOSITORY_PART = /^[A-Za-z0-9_.-]{1,100}$/;
 export interface RepositoryProjectInput {
   repositoryOwner: string;
   repositoryName: string;
-  defaultBranch: string;
+  defaultBranch?: string;
   githubRepositoryId?: number;
 }
 
@@ -27,21 +27,31 @@ export async function resolveOrCreateRepositoryProject(
   input: RepositoryProjectInput,
 ): Promise<RepositoryProject> {
   if (!REPOSITORY_PART.test(input.repositoryOwner) || !REPOSITORY_PART.test(input.repositoryName)
-    || !input.defaultBranch || input.defaultBranch.length > 255
+    || (input.defaultBranch !== undefined && (!input.defaultBranch || input.defaultBranch.length > 255))
     || (input.githubRepositoryId !== undefined && (!Number.isSafeInteger(input.githubRepositoryId) || input.githubRepositoryId <= 0))) {
     throw new HttpError(400, "invalid_repository", "Repository identity is invalid");
   }
-  const find = () => env.DB.prepare(`
-    SELECT id, organization_id, repository_owner, repository_name FROM projects
-     WHERE organization_id = ? AND (
-       (? IS NOT NULL AND github_repository_id = ?)
-       OR (lower(repository_owner) = lower(?) AND lower(repository_name) = lower(?))
-     ) LIMIT 1
-  `).bind(organizationId, input.githubRepositoryId ?? null, input.githubRepositoryId ?? null,
-    input.repositoryOwner, input.repositoryName).first<{
-      id: string; organization_id: string; repository_owner: string; repository_name: string;
-    }>();
-  let project = await find();
+  type StoredProject = { id: string; organization_id: string; repository_owner: string;
+    repository_name: string; github_repository_id: number | null };
+  const findById = (repositoryId: number) => env.DB.prepare(`
+    SELECT id, organization_id, repository_owner, repository_name, github_repository_id FROM projects
+     WHERE organization_id = ? AND github_repository_id = ? LIMIT 1
+  `).bind(organizationId, repositoryId).first<StoredProject>();
+  const findByName = () => env.DB.prepare(`
+    SELECT id, organization_id, repository_owner, repository_name, github_repository_id FROM projects
+     WHERE organization_id = ? AND lower(repository_owner) = lower(?) AND lower(repository_name) = lower(?) LIMIT 1
+  `).bind(organizationId, input.repositoryOwner, input.repositoryName).first<StoredProject>();
+  const resolveExisting = async (): Promise<StoredProject | null> => {
+    if (input.githubRepositoryId === undefined) return findByName();
+    const identified = await findById(input.githubRepositoryId);
+    if (identified) return identified;
+    const named = await findByName();
+    if (named?.github_repository_id != null) {
+      throw new HttpError(409, "repository_identity_conflict", "This repository name belongs to a different GitHub repository identity");
+    }
+    return named;
+  };
+  let project = await resolveExisting();
   let created = false;
   if (!project) {
     const projectId = randomId("prj");
@@ -53,19 +63,27 @@ export async function resolveOrCreateRepositoryProject(
         (id, organization_id, name, slug, repository_owner, repository_name, github_repository_id, default_branch)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
         .bind(projectId, organizationId, input.repositoryName, slug, input.repositoryOwner, input.repositoryName,
-          input.githubRepositoryId ?? null, input.defaultBranch).run();
+          input.githubRepositoryId ?? null, input.defaultBranch ?? "main").run();
       created = Number(result.meta?.["changes"] ?? 0) === 1;
     } catch (error) {
       if (!String(error).includes("UNIQUE")) throw error;
     }
-    project = await find();
+    project = await resolveExisting();
     if (!project) throw new HttpError(409, "project_conflict", "The repository conflicts with an existing project");
   } else {
-    await env.DB.prepare(`UPDATE projects SET repository_owner = ?, repository_name = ?,
-      github_repository_id = COALESCE(?, github_repository_id), default_branch = ?, deleted_at = NULL,
-      updated_at = unixepoch() WHERE id = ? AND organization_id = ?`)
-      .bind(input.repositoryOwner, input.repositoryName, input.githubRepositoryId ?? null, input.defaultBranch,
-        project.id, organizationId).run();
+    try {
+      await env.DB.prepare(`UPDATE projects SET repository_owner = ?, repository_name = ?,
+        github_repository_id = COALESCE(?, github_repository_id),
+        default_branch = CASE WHEN ? IS NULL THEN default_branch ELSE ? END, deleted_at = NULL,
+        updated_at = unixepoch() WHERE id = ? AND organization_id = ?`)
+        .bind(input.repositoryOwner, input.repositoryName, input.githubRepositoryId ?? null,
+          input.defaultBranch ?? null, input.defaultBranch ?? null, project.id, organizationId).run();
+    } catch (error) {
+      if (String(error).includes("UNIQUE")) {
+        throw new HttpError(409, "repository_identity_conflict", "Repository identity conflicts with another project");
+      }
+      throw error;
+    }
   }
   await env.DB.prepare(`INSERT INTO suites (id, organization_id, project_id, name, is_system_default)
     VALUES (?, ?, ?, 'default', 1) ON CONFLICT (organization_id, project_id, name) DO NOTHING`)

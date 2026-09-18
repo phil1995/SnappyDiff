@@ -11,13 +11,13 @@ export async function exchangeWorkspaceKey(request: Request, env: Env): Promise<
   await requireOrganizationWritable(env, principal.organizationId);
   const body = await readJson<{ repositoryOwner?: unknown; repositoryName?: unknown; defaultBranch?: unknown }>(request);
   if (typeof body.repositoryOwner !== "string" || typeof body.repositoryName !== "string"
-    || typeof body.defaultBranch !== "string") {
-    throw new HttpError(400, "invalid_repository", "repositoryOwner, repositoryName, and defaultBranch are required");
+    || (body.defaultBranch !== undefined && typeof body.defaultBranch !== "string")) {
+    throw new HttpError(400, "invalid_repository", "repositoryOwner and repositoryName are required");
   }
   const project = await resolveOrCreateRepositoryProject(env, principal.organizationId, {
     repositoryOwner: body.repositoryOwner,
     repositoryName: body.repositoryName,
-    defaultBranch: body.defaultBranch,
+    ...(body.defaultBranch === undefined ? {} : { defaultBranch: body.defaultBranch }),
   });
   if (project.created) {
     await env.DB.prepare(`INSERT INTO audit_events

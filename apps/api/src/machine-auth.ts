@@ -61,6 +61,9 @@ export async function requireWorkspacePrincipal(request: Request, env: Env): Pro
   let scopes: string[];
   try { scopes = JSON.parse(record.scopes_json) as string[]; }
   catch { throw new HttpError(401, "invalid_workspace_key", "Workspace upload key has invalid scopes"); }
+  if (!Array.isArray(scopes) || !scopes.every((scope) => typeof scope === "string")) {
+    throw new HttpError(401, "invalid_workspace_key", "Workspace upload key has invalid scopes");
+  }
   if (!scopes.includes("projects:bootstrap") || !scopes.includes("runs:create")) {
     throw new HttpError(403, "permission_denied", "Workspace upload key cannot provision repositories");
   }
@@ -78,7 +81,7 @@ export async function requireMachinePrincipal(request: Request, env: Env): Promi
     const grant = await verifyJson<WorkspaceMachineGrant>(token.slice("sd_wkg_".length), env.TOKEN_PEPPER);
     if (!grant || grant.source !== "workspace_key" || grant.exp < Date.now() / 1000
       || !Array.isArray(grant.scopes) || !grant.scopes.includes("runs:create")
-      || typeof grant.projectId !== "string" || typeof grant.organizationId !== "string") {
+      || typeof grant.tokenId !== "string" || typeof grant.projectId !== "string" || typeof grant.organizationId !== "string") {
       throw new HttpError(401, "invalid_workspace_credential", "Workspace credential is invalid or expired");
     }
     return { kind: "token", tokenId: grant.tokenId, organizationId: grant.organizationId,
