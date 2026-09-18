@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { finishLogin, safeReturnPath } from "./auth.ts";
+import { beginLogin, finishLogin, safeReturnPath } from "./auth.ts";
 
 describe("authentication", () => {
   it("keeps return paths on the configured origin", () => {
@@ -8,6 +8,35 @@ describe("authentication", () => {
     assert.equal(safeReturnPath("/\\evil.example", "https://app.example"), "/");
     assert.equal(safeReturnPath("//evil.example", "https://app.example"), "/");
     assert.equal(safeReturnPath("https://evil.example", "https://app.example"), "/");
+  });
+
+  it("creates a seeded administrator session only in the local environment", async () => {
+    const statement = {
+      first: async () => ({
+        user_id: "usr_local", workos_user_id: "usr_local_workos", email: "local@snappydiff.dev",
+        organization_id: "org_local", workos_organization_id: "org_local_workos", role: "admin",
+      }),
+    };
+    const response = await beginLogin(new Request("http://localhost:8787/auth/login?return_to=/projects/new"), {
+      APP_ENV: "local", APP_ORIGIN: "http://localhost:8787",
+      WORKOS_COOKIE_PASSWORD: "a-local-cookie-password-with-32-bytes",
+      DB: { prepare: () => statement },
+    } as never);
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get("location"), "http://localhost:8787/projects/new");
+    assert.match(response.headers.get("set-cookie") ?? "", /^snappydiff_session=/);
+    assert.doesNotMatch(response.headers.get("set-cookie") ?? "", /; Secure/);
+  });
+
+  it("never uses the local session shortcut outside APP_ENV=local", async () => {
+    const response = await beginLogin(new Request("https://staging.example/auth/login"), {
+      APP_ENV: "staging", APP_ORIGIN: "https://staging.example", WORKOS_CLIENT_ID: "client_1",
+      WORKOS_REDIRECT_URI: "https://staging.example/auth/callback",
+      WORKOS_COOKIE_PASSWORD: "a-staging-cookie-password-with-32-bytes",
+      DB: { prepare: () => { throw new Error("staging login must not query the local seed"); } },
+    } as never);
+    assert.equal(new URL(response.headers.get("location")!).origin, "https://api.workos.com");
+    assert.equal(response.headers.get("set-cookie")?.includes("Secure"), true);
   });
 
   it("serializes the WorkOS API key as client_secret", async () => {
@@ -42,4 +71,3 @@ describe("authentication", () => {
     }
   });
 });
-

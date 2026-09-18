@@ -53,6 +53,7 @@ export async function beginLogin(request: Request, env: Env): Promise<Response> 
   const url = new URL(request.url);
   const requestedReturn = url.searchParams.get("return_to") ?? "/";
   const returnTo = safeReturnPath(requestedReturn, env.APP_ORIGIN);
+  if (env.APP_ENV === "local") return beginLocalLogin(env, returnTo);
   const state: OAuthState = { nonce: randomId("state"), returnTo, exp: Math.floor(Date.now() / 1000) + 600 };
   const encodedState = await signJson(state, sessionSecret(env));
   const authorize = new URL("https://api.workos.com/user_management/authorize");
@@ -65,7 +66,40 @@ export async function beginLogin(request: Request, env: Env): Promise<Response> 
     status: 302,
     headers: {
       location: authorize.toString(),
-      "set-cookie": cookie(OAUTH_STATE_COOKIE, encodedState, 600, env.APP_ENV !== "local"),
+      "set-cookie": cookie(OAUTH_STATE_COOKIE, encodedState, 600, true),
+      "cache-control": "no-store",
+    },
+  });
+}
+
+async function beginLocalLogin(env: Env, returnTo: string): Promise<Response> {
+  const local = await env.DB.prepare(`
+    SELECT u.id AS user_id, u.workos_user_id, u.email, o.id AS organization_id,
+      o.workos_organization_id, m.role
+      FROM memberships m JOIN users u ON u.id = m.user_id
+      JOIN organizations o ON o.id = m.organization_id
+     WHERE o.id = 'org_local' AND u.id = 'usr_local' AND m.status = 'active'
+  `).first<{
+    user_id: string; workos_user_id: string; email: string; organization_id: string;
+    workos_organization_id: string; role: HumanRole;
+  }>();
+  if (!local) throw new HttpError(503, "local_seed_required", "Run npm run dev to initialize the local workspace");
+  const lifetime = 12 * 60 * 60;
+  const session: Session = {
+    userId: local.user_id,
+    externalUserId: local.workos_user_id,
+    organizationId: local.organization_id,
+    externalOrganizationId: local.workos_organization_id,
+    role: local.role,
+    email: local.email,
+    exp: Math.floor(Date.now() / 1000) + lifetime,
+  };
+  const signedSession = await signJson(session, sessionSecret(env));
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: new URL(returnTo, env.APP_ORIGIN).toString(),
+      "set-cookie": cookie(SESSION_COOKIE, signedSession, lifetime, false),
       "cache-control": "no-store",
     },
   });

@@ -84,7 +84,7 @@ async function completeGitHubCallback(routeGeneration) {
 
 function renderLogin() {
   state.me = null;
-  root.innerHTML = `<main class="center"><section class="hero"><span class="eyebrow">Visual review for CI</span><h1>See the change.<br>Ship with confidence.</h1><p>Private screenshot comparisons, precise baselines, and GitHub checks—without making product images public.</p><a class="button primary" href="/auth/login">Sign in with WorkOS</a></section></main>`;
+  root.innerHTML = `<main class="center"><section class="hero"><span class="eyebrow">Visual review for CI</span><h1>See the change.<br>Ship with confidence.</h1><p>Private screenshot comparisons, precise baselines, and GitHub checks—without making product images public.</p><a class="button primary" href="/auth/login">Sign in</a></section></main>`;
 }
 
 async function renderHome(routeGeneration) {

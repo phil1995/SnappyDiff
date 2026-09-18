@@ -17,6 +17,19 @@ The repository is deliberately safe to clone without credentials. Provider integ
 
 Prerequisites are Node.js 22+, npm 11+, Rust 1.85+, and Wrangler 4+. Rust is only needed for the CLI.
 
+For dashboard and Worker development, install dependencies and run:
+
+```bash
+npm run dev
+```
+
+This applies local D1 migrations, seeds a local administrator plus representative dashboard data,
+creates ignored local-only signing secrets, watches dashboard assets, and serves the complete app at
+`http://localhost:8787`. Selecting **Sign in** creates a local admin session without contacting WorkOS.
+The local shortcut is gated by `APP_ENV=local` and is unavailable in staging and production.
+If an older checkout left incompatible emulator data behind, `npm run dev:reset` rebuilds only the
+ignored local Wrangler state and then starts the same development server.
+
 ```bash
 npm install
 mkdir -p apps/api
