@@ -4,7 +4,9 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import type { Session } from "./auth.ts";
-import { beginGitHubOnboarding, completeGitHubOnboarding, githubProjectSlug, verifyGitHubWebhook } from "./github.ts";
+import {
+  beginGitHubOnboarding, completeGitHubOnboarding, githubProjectSlug, handleGitHubWebhook, verifyGitHubWebhook,
+} from "./github.ts";
 import type { Env } from "./platform.ts";
 
 const encoder = new TextEncoder();
@@ -47,13 +49,18 @@ class FakeStatement {
   private readonly database: FakeDatabase;
   constructor(query: string, database: FakeDatabase) { this.query = query; this.database = database; }
   bind(...values: unknown[]): this { this.values = values; return this; }
-  async first<T>(): Promise<T | null> { return null; }
+  async first<T>(): Promise<T | null> {
+    if (this.query.includes("FROM github_installation_owners")) return this.database.installationOwner as T | null;
+    return null;
+  }
   async all<T>(): Promise<{ success: boolean; results: T[] }> {
     if (this.query.includes("FROM projects WHERE organization_id")) return { success: true, results: this.database.projects as T[] };
     if (this.query.includes("FROM github_installations")) return { success: true, results: this.database.mappings as T[] };
     return { success: true, results: [] };
   }
-  async run<T>(): Promise<{ success: boolean; results: T[] }> { return { success: true, results: [] }; }
+  async run<T>(): Promise<{ success: boolean; results: T[]; meta: { changes: number } }> {
+    return { success: true, results: [], meta: { changes: 1 } };
+  }
   async raw<T>(): Promise<T[]> { return []; }
 }
 
@@ -63,6 +70,7 @@ class FakeDatabase {
   batchError: Error | null = null;
   projects: unknown[] = [];
   mappings: unknown[] = [];
+  installationOwner: unknown = null;
   prepare(query: string): FakeStatement { const statement = new FakeStatement(query, this); this.statements.push(statement); return statement; }
   async batch<T>(statements: FakeStatement[]): Promise<Array<{ success: boolean; results: T[] }>> {
     this.batchStatements = statements;
@@ -162,6 +170,38 @@ describe("GitHub-first onboarding", () => {
       }), environment, admin, { requestId: "req_race", startedAt: 0 }), (error: unknown) => {
         return typeof error === "object" && error !== null && "code" in error && error.code === "installation_already_linked";
       });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it("provisions newly selected repositories from the signed GitHub webhook", async () => {
+    const database = new FakeDatabase();
+    database.installationOwner = { organization_id: "org_1" };
+    database.projects = [
+      { id: "prj_existing", name: "Renamed", slug: "renamed", repository_owner: "owner", repository_name: "renamed", github_repository_id: 101 },
+    ];
+    const environment = { ...githubEnvironment, DB: database, GITHUB_WEBHOOK_SECRET: "webhook-secret" } as unknown as Env;
+    const payload = encoder.encode(JSON.stringify({
+      action: "added",
+      installation: { id: 77 },
+      repositories_added: [{ id: 202, name: "shared", owner: { login: "owner" } }],
+      repositories_removed: [],
+    }));
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = githubFetchFixture();
+    try {
+      const response = await handleGitHubWebhook(new Request("https://example.test/webhooks/github", {
+        method: "POST",
+        headers: {
+          "x-github-delivery": "delivery_repo_added",
+          "x-github-event": "installation_repositories",
+          "x-hub-signature-256": await signature(payload, "webhook-secret"),
+        },
+        body: payload,
+      }), environment);
+      assert.equal(response.status, 200);
+      assert.equal(database.batchStatements.filter((statement) => statement.query.includes("INSERT INTO projects")).length, 2);
+      assert.equal(database.batchStatements.filter((statement) => statement.query.includes("INSERT INTO github_installations")).length, 3);
+      assert.ok(database.batchStatements.some((statement) => statement.query.includes("github.installation_webhook_synced")));
     } finally { globalThis.fetch = originalFetch; }
   });
 });
