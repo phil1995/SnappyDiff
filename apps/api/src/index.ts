@@ -9,7 +9,10 @@ import { handleWorkOSWebhook } from "./workos-webhook.ts";
 import { requireMachinePrincipal } from "./machine-auth.ts";
 import { handleLocalUpload } from "./upload-urls.ts";
 import { completeUpload, finalizeShard, getRunStatus, listShardUploads, registerRun, submitManifestPage } from "./uploads.ts";
-import { beginGitHubInstallationLink, handleGitHubWebhook, linkGitHubInstallation } from "./github.ts";
+import {
+  beginGitHubInstallationLink, beginGitHubOnboarding, completeGitHubOnboarding,
+  handleGitHubWebhook, linkGitHubInstallation,
+} from "./github.ts";
 import { decideComparison, getComparison } from "./reports.ts";
 import { exchangeGitHubOidc } from "./github-oidc.ts";
 import { getDashboardRun, getPrivateImage, listProjectRuns } from "./dashboard.ts";
@@ -98,7 +101,17 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     }
     if (request.method !== "GET") await requireOrganizationWritable(env, session.organizationId);
     if (url.pathname === `${API_PREFIX}/me` && request.method === "GET") {
-      return json({ user: { id: session.userId, email: session.email, role: session.role }, organizationId: session.organizationId });
+      return json({
+        user: { id: session.userId, email: session.email, role: session.role },
+        organizationId: session.organizationId,
+        configuration: { appOrigin: env.APP_ORIGIN, oidcAudience: env.GITHUB_OIDC_AUDIENCE },
+      });
+    }
+    if (url.pathname === `${API_PREFIX}/github/installations/authorize` && request.method === "POST") {
+      return beginGitHubOnboarding(env, session);
+    }
+    if (url.pathname === `${API_PREFIX}/github/installations` && request.method === "POST") {
+      return completeGitHubOnboarding(request, env, session, context);
     }
     if (url.pathname === `${API_PREFIX}/projects`) {
       if (request.method === "GET") return listProjects(env, session);

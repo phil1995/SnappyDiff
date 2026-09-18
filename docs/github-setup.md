@@ -13,7 +13,9 @@ Subscribe to `installation`, `installation_repositories`, `pull_request`, and `p
 
 Store the App private key, webhook secret, and OAuth client secret as `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_OAUTH_CLIENT_SECRET` Worker secrets. Set the public App client ID as `GITHUB_OAUTH_CLIENT_ID`. The Worker exchanges its short-lived App JWT for an installation token; installation and user tokens are never persisted.
 
-After installing the App, an organization administrator starts the project installation-link flow with the numeric installation ID, authorizes with GitHub, and completes the link with the returned code and signed state. The Worker verifies that the authenticated GitHub user can access that installation and that the installation includes the project's exact repository before persisting the tenant mapping.
+Set the callback URL to `<APP_ORIGIN>/github/callback` and enable **Request user authorization (OAuth) during installation**. An organization administrator then selects **Connect GitHub** in SnappyDiff and chooses repositories in GitHub. The Worker verifies the signed tenant state and confirms through the short-lived GitHub user token that the administrator controls the installation. It creates or restores one project per selected repository, synchronizes default branches and installation mappings, and never persists the GitHub user token.
+
+If OAuth-on-install is disabled, configure the same address as the App's setup URL. SnappyDiff will send the administrator through GitHub authorization as a second step before synchronizing repositories. GitHub documents that the numeric `installation_id` callback parameter is spoofable, so it is never trusted without this user-token ownership check.
 
 ## GitHub Actions OIDC
 

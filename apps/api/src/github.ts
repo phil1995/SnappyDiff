@@ -16,6 +16,23 @@ interface GitHubLinkState {
   exp: number;
 }
 
+interface GitHubOnboardingState {
+  purpose: "github_onboarding";
+  organizationId: string;
+  userId: string;
+  installationId?: number;
+  nonce: string;
+  exp: number;
+}
+
+interface GitHubRepository {
+  id: number;
+  name: string;
+  owner: { login: string };
+  default_branch: string;
+  permissions?: { admin?: boolean };
+}
+
 function githubLinkSecret(env: Env): string {
   if (!env.WORKOS_COOKIE_PASSWORD || env.WORKOS_COOKIE_PASSWORD.length < 32) {
     throw new HttpError(503, "authentication_not_configured", "GitHub linking is not configured");
@@ -150,6 +167,157 @@ function githubHeaders(token: string): Record<string, string> {
     "user-agent": "SnappyDiff",
     "x-github-api-version": "2022-11-28",
   };
+}
+
+function githubAuthorizationUrl(env: Env, state: string): string {
+  const authorizationUrl = new URL("https://github.com/login/oauth/authorize");
+  authorizationUrl.searchParams.set("client_id", env.GITHUB_OAUTH_CLIENT_ID);
+  authorizationUrl.searchParams.set("redirect_uri", `${env.APP_ORIGIN}/github/callback`);
+  authorizationUrl.searchParams.set("state", state);
+  return authorizationUrl.toString();
+}
+
+async function exchangeGitHubUserToken(env: Env, code: string): Promise<string> {
+  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json", "user-agent": "SnappyDiff" },
+    body: JSON.stringify({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!tokenResponse.ok) throw new HttpError(401, "github_oauth_failed", "GitHub rejected the authorization code");
+  const tokenPayload = await tokenResponse.json() as { access_token?: string };
+  if (!tokenPayload.access_token) throw new HttpError(401, "github_oauth_failed", "GitHub authorization did not grant installation access");
+  return tokenPayload.access_token;
+}
+
+export function githubProjectSlug(repositoryName: string, repositoryId: number): string {
+  const suffix = Math.max(0, repositoryId).toString(36);
+  const base = repositoryName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "repository";
+  return `${base.slice(0, Math.max(1, 62 - suffix.length)).replace(/-+$/g, "")}-${suffix}`;
+}
+
+export async function beginGitHubOnboarding(env: Env, session: Session): Promise<Response> {
+  requirePermission(session, "projects:admin");
+  if (!env.GITHUB_APP_SLUG || !env.GITHUB_OAUTH_CLIENT_ID) {
+    throw new HttpError(503, "github_not_configured", "GitHub onboarding is not configured");
+  }
+  const state: GitHubOnboardingState = {
+    purpose: "github_onboarding",
+    organizationId: session.organizationId,
+    userId: session.userId,
+    nonce: randomId("ghstate"),
+    exp: Math.floor(Date.now() / 1000) + 600,
+  };
+  const installationUrl = new URL(`https://github.com/apps/${encodeURIComponent(env.GITHUB_APP_SLUG)}/installations/new`);
+  installationUrl.searchParams.set("state", await signJson(state, githubLinkSecret(env)));
+  return json({ installationUrl: installationUrl.toString() });
+}
+
+export async function completeGitHubOnboarding(
+  request: Request,
+  env: Env,
+  session: Session,
+  context: RequestContext,
+): Promise<Response> {
+  requirePermission(session, "projects:admin");
+  if (!env.GITHUB_OAUTH_CLIENT_SECRET || !env.GITHUB_OAUTH_CLIENT_ID) {
+    throw new HttpError(503, "github_oauth_not_configured", "GitHub OAuth is not configured");
+  }
+  const body = await readJson<{ code?: unknown; state?: unknown; installationId?: unknown }>(request);
+  if (typeof body.state !== "string") throw new HttpError(400, "invalid_github_callback", "GitHub state is required");
+  const state = await verifyJson<GitHubOnboardingState>(body.state, githubLinkSecret(env));
+  if (!state || state.purpose !== "github_onboarding" || state.exp < Date.now() / 1000
+    || state.organizationId !== session.organizationId || state.userId !== session.userId) {
+    throw new HttpError(400, "invalid_github_state", "GitHub onboarding state is invalid or expired");
+  }
+  const installationId = state.installationId ?? body.installationId;
+  if (!Number.isSafeInteger(installationId) || Number(installationId) <= 0
+    || (state.installationId !== undefined && state.installationId !== Number(body.installationId ?? state.installationId))) {
+    throw new HttpError(400, "invalid_installation", "GitHub returned an invalid installation");
+  }
+  if (typeof body.code !== "string" || !body.code) {
+    const oauthState: GitHubOnboardingState = {
+      ...state, installationId: Number(installationId), nonce: randomId("ghstate"), exp: Math.floor(Date.now() / 1000) + 600,
+    };
+    return json({ authorizationUrl: githubAuthorizationUrl(env, await signJson(oauthState, githubLinkSecret(env))) });
+  }
+
+  const userToken = await exchangeGitHubUserToken(env, body.code);
+  const repositories: GitHubRepository[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const response = await fetch(`https://api.github.com/user/installations/${Number(installationId)}/repositories?per_page=100&page=${page}`, {
+      headers: githubHeaders(userToken), signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new HttpError(403, "installation_ownership_failed", "Your GitHub account cannot administer this installation");
+    const payload = await response.json() as { repositories?: GitHubRepository[] };
+    const pageRepositories = payload.repositories ?? [];
+    repositories.push(...pageRepositories.filter((repository) => repository.permissions?.admin === true));
+    if (pageRepositories.length < 100) break;
+    if (page === 10) throw new HttpError(422, "too_many_repositories", "Select fewer than 1,000 repositories for one SnappyDiff installation");
+  }
+  if (repositories.length === 0) {
+    throw new HttpError(403, "repository_administration_required", "Select at least one repository that you administer");
+  }
+
+  const claimed = await env.DB.prepare("SELECT organization_id FROM github_installations WHERE installation_id = ? LIMIT 1")
+    .bind(Number(installationId)).first<{ organization_id: string }>();
+  if (claimed && claimed.organization_id !== session.organizationId) {
+    throw new HttpError(409, "installation_already_linked", "This GitHub installation is already linked to another SnappyDiff workspace");
+  }
+  const existing = await env.DB.prepare(`
+    SELECT id, name, slug, repository_owner, repository_name FROM projects WHERE organization_id = ?
+  `).bind(session.organizationId).all<{ id: string; name: string; slug: string; repository_owner: string; repository_name: string }>();
+  const byRepository = new Map((existing.results ?? []).map((project) => [
+    `${project.repository_owner.toLowerCase()}/${project.repository_name.toLowerCase()}`, project,
+  ]));
+  const usedSlugs = new Set((existing.results ?? []).map((project) => project.slug));
+  const statements = [env.DB.prepare(`
+    UPDATE github_installations SET suspended_at = unixepoch(), updated_at = unixepoch()
+     WHERE organization_id = ? AND installation_id = ?
+  `).bind(session.organizationId, Number(installationId))];
+  const projects: Array<{ id: string; name: string; repositoryOwner: string; repositoryName: string; defaultBranch: string; created: boolean }> = [];
+  for (const repository of repositories) {
+    const key = `${repository.owner.login.toLowerCase()}/${repository.name.toLowerCase()}`;
+    const prior = byRepository.get(key);
+    const projectId = prior?.id ?? randomId("prj");
+    if (prior) {
+      statements.push(env.DB.prepare(`
+        UPDATE projects SET repository_owner = ?, repository_name = ?, deleted_at = NULL,
+          default_branch = ?, updated_at = unixepoch()
+         WHERE id = ? AND organization_id = ?
+      `).bind(repository.owner.login, repository.name, repository.default_branch, projectId, session.organizationId));
+    } else {
+      let slug = githubProjectSlug(repository.name, repository.id);
+      if (usedSlugs.has(slug)) slug = `repository-${projectId.slice(-12)}`;
+      usedSlugs.add(slug);
+      statements.push(
+        env.DB.prepare(`INSERT INTO projects
+          (id, organization_id, name, slug, repository_owner, repository_name, default_branch)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .bind(projectId, session.organizationId, repository.name, slug, repository.owner.login, repository.name, repository.default_branch),
+        env.DB.prepare("INSERT INTO suites (id, organization_id, project_id, name, is_system_default) VALUES (?, ?, ?, 'default', 1)")
+          .bind(randomId("ste"), session.organizationId, projectId),
+      );
+    }
+    statements.push(env.DB.prepare(`
+      INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)
+      DO UPDATE SET account_login = excluded.account_login, suspended_at = NULL, updated_at = unixepoch()
+    `).bind(randomId("ghi"), session.organizationId, Number(installationId), repository.owner.login, repository.owner.login, repository.name));
+    projects.push({ id: projectId, name: prior?.name ?? repository.name, repositoryOwner: repository.owner.login,
+      repositoryName: repository.name, defaultBranch: repository.default_branch, created: !prior });
+  }
+  statements.push(env.DB.prepare(`
+    INSERT INTO audit_events (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
+    VALUES (?, ?, ?, 'github.installation_synced', 'github_installation', ?, ?, ?)
+  `).bind(randomId("aud"), session.organizationId, session.userId, String(installationId), context.requestId,
+    JSON.stringify({ repositoryCount: repositories.length, createdProjectCount: projects.filter((project) => project.created).length })));
+  try { await env.DB.batch(statements); }
+  catch (error) {
+    if (String(error).includes("UNIQUE")) throw new HttpError(409, "github_sync_conflict", "One of these repositories is already connected elsewhere");
+    throw error;
+  }
+  return json({ installationId: Number(installationId), projects });
 }
 
 export async function classifyPullRequestFork(
@@ -407,19 +575,12 @@ export async function linkGitHubInstallation(
   const project = await env.DB.prepare("SELECT repository_owner, repository_name FROM projects WHERE id = ? AND organization_id = ? AND deleted_at IS NULL")
     .bind(projectId, session.organizationId).first<{ repository_owner: string; repository_name: string }>();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
-  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: { accept: "application/json", "content-type": "application/json", "user-agent": "SnappyDiff" },
-    body: JSON.stringify({ client_id: env.GITHUB_OAUTH_CLIENT_ID, client_secret: env.GITHUB_OAUTH_CLIENT_SECRET, code: body.code }),
-  });
-  if (!tokenResponse.ok) throw new HttpError(401, "github_oauth_failed", "GitHub rejected the authorization code");
-  const tokenPayload = await tokenResponse.json() as { access_token?: string; error?: string };
-  if (!tokenPayload.access_token) throw new HttpError(401, "github_oauth_failed", "GitHub authorization did not grant installation access");
+  const userToken = await exchangeGitHubUserToken(env, body.code);
   const installationId = state.installationId;
   let repositoryInstalled = false;
   for (let page = 1; page <= 10 && !repositoryInstalled; page++) {
     const repositoriesResponse = await fetch(`https://api.github.com/user/installations/${installationId}/repositories?per_page=100&page=${page}`, {
-      headers: githubHeaders(tokenPayload.access_token),
+      headers: githubHeaders(userToken),
     });
     if (!repositoriesResponse.ok) throw new HttpError(403, "installation_ownership_failed", "The GitHub user cannot access this installation");
     const repositories = await repositoriesResponse.json() as { repositories: Array<{ name: string; owner: { login: string } }> };
@@ -431,7 +592,7 @@ export async function linkGitHubInstallation(
     throw new HttpError(403, "repository_not_installed", "GitHub App installation does not include this repository");
   }
   const permissionResponse = await fetch(`https://api.github.com/repos/${encodeURIComponent(project.repository_owner)}/${encodeURIComponent(project.repository_name)}`, {
-    headers: githubHeaders(tokenPayload.access_token),
+    headers: githubHeaders(userToken),
   });
   if (!permissionResponse.ok || !((await permissionResponse.json()) as { permissions?: { admin?: boolean } }).permissions?.admin) {
     throw new HttpError(403, "installation_ownership_failed", "The GitHub user must administer the repository to link its installation");
@@ -480,9 +641,5 @@ export async function beginGitHubInstallationLink(
     nonce: randomId("ghstate"),
     exp: Math.floor(Date.now() / 1000) + 600,
   };
-  const authorizationUrl = new URL("https://github.com/login/oauth/authorize");
-  authorizationUrl.searchParams.set("client_id", env.GITHUB_OAUTH_CLIENT_ID);
-  authorizationUrl.searchParams.set("redirect_uri", `${env.APP_ORIGIN}/github/callback`);
-  authorizationUrl.searchParams.set("state", await signJson(state, githubLinkSecret(env)));
-  return json({ authorizationUrl: authorizationUrl.toString() });
+  return json({ authorizationUrl: githubAuthorizationUrl(env, await signJson(state, githubLinkSecret(env))) });
 }

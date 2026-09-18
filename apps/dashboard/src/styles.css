@@ -48,6 +48,22 @@ a.card:hover { transform: translateY(-2px); border-color: #4a525d; } .repo { col
 .project-form input:focus { outline: 2px solid #d9ff5744; border-color: var(--accent); }
 .form-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
 .form-error { border: 1px solid #733632; background: #3d1c1a66; color: #ffaaa6; border-radius: 9px; padding: 11px 12px; font-size: 13px; line-height: 1.4; }
+.connect-card { text-align: center; }
+.connect-card > p { color: var(--muted); line-height: 1.55; }
+.github-mark { width: 48px; height: 48px; margin: 0 auto 18px; border-radius: 50%; display: grid; place-items: center; background: #f4f4f0; color: #111; font-weight: 850; letter-spacing: -.08em; }
+.connect-button { width: 100%; min-height: 48px; margin-top: 14px; }
+.connect-card .privacy-note { font-size: 12px; }
+.connect-card details { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); text-align: left; }
+.connect-card summary { color: var(--muted); cursor: pointer; font-size: 12px; }
+.connect-card details form { margin-top: 18px; }
+.setup-complete { text-align: center; max-width: 760px; margin: 20px auto 44px; }
+.setup-complete h1 { font-size: clamp(32px, 5vw, 54px); }
+.setup-complete p { color: var(--muted); }
+.success-mark { width: 54px; height: 54px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 50%; background: #173626; color: var(--success); border: 1px solid #286b49; font-size: 25px; }
+.setup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.step-label { display: block; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .1em; font-size: 10px; font-weight: 750; }
+pre { margin: 16px 0 0; padding: 16px; overflow: auto; border: 1px solid #292f36; border-radius: 9px; background: #090b0d; color: #dce3cf; text-align: left; }
+pre code { font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .crumbs { display: flex; gap: 8px; color: var(--muted); font-size: 13px; margin-bottom: 22px; } .crumbs a { text-decoration: none; } .crumbs a:hover { color: #fff; }
 .run-list { border: 1px solid var(--line); border-radius: 13px; overflow: hidden; background: #0e1115; }
 .run-row { display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(120px, .7fr) 110px 180px; align-items: center; gap: 18px; padding: 15px 18px; border-bottom: 1px solid #22272e; text-decoration: none; }
@@ -86,5 +102,6 @@ a.card:hover { transform: translateY(-2px); border-color: #4a525d; } .repo { col
   .stats { grid-template-columns: repeat(2, 1fr); } .review-layout { grid-template-columns: 1fr; }
   .settings-grid { grid-template-columns: 1fr; } .settings-card.wide { grid-column: auto; } .history-row { grid-template-columns: 90px 1fr; } .history-row > :nth-child(n+3) { display: none; }
   .onboarding { grid-template-columns: 1fr; } .onboarding-copy { padding-top: 0; } .setup-steps { margin: 24px 0 8px; }
+  .setup-grid { grid-template-columns: 1fr; }
   .review-sidebar { position: static; height: auto; max-height: 210px; border-right: 0; border-bottom: 1px solid var(--line); } .review-main { padding: 14px; } .viewport { min-height: 420px; }
 }
