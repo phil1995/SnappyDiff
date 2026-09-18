@@ -3,7 +3,7 @@ import { randomId, sha256 } from "./crypto.ts";
 import { errorResponse, HttpError, json, withRequestId, type RequestContext } from "./http.ts";
 import { drainJobs, enqueueSystemJob } from "./jobs.ts";
 import type { Env, ExecutionContext, ScheduledController } from "./platform.ts";
-import { createProject, getProject, listProjects } from "./projects.ts";
+import { getProject, listProjects } from "./projects.ts";
 import { enforceRateLimit } from "./rate-limit.ts";
 import { handleWorkOSWebhook } from "./workos-webhook.ts";
 import { requireMachinePrincipal } from "./machine-auth.ts";
@@ -17,9 +17,10 @@ import { decideComparison, getComparison } from "./reports.ts";
 import { exchangeGitHubOidc } from "./github-oidc.ts";
 import { getDashboardRun, getPrivateImage, listProjectRuns } from "./dashboard.ts";
 import {
-  controlBaseline, createToken, getProjectOperations, listMembers, listTokens,
+  controlBaseline, createWorkspaceToken, getProjectOperations, listMembers, listWorkspaceTokens,
   revokeToken, rotateToken, updateMember, updateProjectSettings,
 } from "./management.ts";
+import { exchangeWorkspaceKey } from "./workspace-auth.ts";
 import {
   cancelOrganizationDeletion, exportOrganization, requireOrganizationWritable, scheduleOrganizationDeletion,
 } from "./privacy.ts";
@@ -54,6 +55,11 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     const ipKey = await requestRateKey(request, "github-oidc");
     await enforceRateLimit(env, ipKey, 60, 60);
     return exchangeGitHubOidc(request, env);
+  }
+  if (url.pathname === `${API_PREFIX}/auth/workspace/exchange` && request.method === "POST") {
+    const ipKey = await requestRateKey(request, "workspace-exchange");
+    await enforceRateLimit(env, ipKey, 60, 60);
+    return exchangeWorkspaceKey(request, env);
   }
 
   const localUploadMatch = url.pathname.match(/^\/api\/v1\/uploads\/([A-Za-z0-9_]+)\/content$/);
@@ -115,7 +121,6 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     }
     if (url.pathname === `${API_PREFIX}/projects`) {
       if (request.method === "GET") return listProjects(env, session);
-      if (request.method === "POST") return createProject(request, env, session, context);
     }
     const installationLink = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/github-installation$/);
     const installationAuthorize = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/github-installation\/authorize$/);
@@ -143,13 +148,12 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     const baselineControlMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/baseline-control$/);
     if (baselineControlMatch?.[1] && request.method === "POST") return controlBaseline(request, env, session, baselineControlMatch[1], context);
     if (url.pathname === `${API_PREFIX}/members` && request.method === "GET") return listMembers(env, session);
+    if (url.pathname === `${API_PREFIX}/workspace-tokens`) {
+      if (request.method === "GET") return listWorkspaceTokens(env, session);
+      if (request.method === "POST") return createWorkspaceToken(request, env, session, context);
+    }
     const memberMatch = url.pathname.match(/^\/api\/v1\/members\/([A-Za-z0-9_]+)$/);
     if (memberMatch?.[1] && request.method === "PATCH") return updateMember(request, env, session, memberMatch[1], context);
-    const projectTokensMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/tokens$/);
-    if (projectTokensMatch?.[1]) {
-      if (request.method === "GET") return listTokens(env, session, projectTokensMatch[1]);
-      if (request.method === "POST") return createToken(request, env, session, projectTokensMatch[1], context);
-    }
     const tokenMatch = url.pathname.match(/^\/api\/v1\/tokens\/([A-Za-z0-9_]+)$/);
     if (tokenMatch?.[1] && request.method === "DELETE") return revokeToken(env, session, tokenMatch[1], context);
     const tokenRotationMatch = url.pathname.match(/^\/api\/v1\/tokens\/([A-Za-z0-9_]+)\/rotate$/);

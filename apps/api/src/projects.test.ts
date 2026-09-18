@@ -1,36 +1,46 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { Session } from "./auth.ts";
-import { createProject, getProject } from "./projects.ts";
+import { resolveOrCreateRepositoryProject } from "./projects.ts";
 
-const admin: Session = {
-  userId: "usr_1", externalUserId: "external", organizationId: "org_1",
-  externalOrganizationId: "external_org", role: "admin", email: "admin@example.com", exp: Number.MAX_SAFE_INTEGER,
-};
-
-describe("project creation", () => {
-  it("rejects unsafe slugs before accessing storage", async () => {
-    const request = new Request("https://example.test/api/v1/projects", {
-      method: "POST",
-      body: JSON.stringify({ name: "Project", slug: "../unsafe", repositoryOwner: "owner", repositoryName: "repo", defaultBranch: "main" }),
-    });
-    const environment = { DB: { batch: () => assert.fail("storage must not be called") } } as never;
-    await assert.rejects(createProject(request, environment, admin, { requestId: "req_1", startedAt: 0 }), /Slug/);
-  });
-
-  it("requires project administration permission", async () => {
-    const request = new Request("https://example.test/api/v1/projects", { method: "POST", body: "{}" });
-    await assert.rejects(createProject(request, {} as never, { ...admin, role: "viewer" }, { requestId: "req_1", startedAt: 0 }), /Permission/);
-  });
-
-  it("scopes project lookup to the authenticated organization", async () => {
-    const calls: unknown[][] = [];
-    const statement = {
-      bind: (...values: unknown[]) => { calls.push(values); return statement; },
-      first: async () => ({ id: "prj_1" }),
+describe("upload-first projects", () => {
+  it("creates one project and reuses it for later uploads", async () => {
+    let project: { id: string; organization_id: string; repository_owner: string; repository_name: string } | null = null;
+    let suiteWrites = 0;
+    const database = {
+      prepare(query: string) {
+        const statement = {
+          values: [] as unknown[],
+          bind(...values: unknown[]) { statement.values = values; return statement; },
+          async first<T>() { return (query.includes("SELECT id, organization_id") ? project : null) as T | null; },
+          async run() {
+            if (query.includes("INSERT INTO projects")) {
+              project = { id: String(statement.values[0]), organization_id: String(statement.values[1]),
+                repository_owner: String(statement.values[4]), repository_name: String(statement.values[5]) };
+              return { success: true, meta: { changes: 1 } };
+            }
+            if (query.includes("INSERT INTO suites")) suiteWrites++;
+            return { success: true, meta: { changes: 1 } };
+          },
+        };
+        return statement;
+      },
     };
-    const environment = { DB: { prepare: () => statement } } as never;
-    await getProject(environment, admin, "prj_1");
-    assert.deepEqual(calls, [["org_1", "prj_1"]]);
+    const environment = { DB: database } as never;
+    const first = await resolveOrCreateRepositoryProject(environment, "org_1", {
+      repositoryOwner: "pointfreeco", repositoryName: "swift-snapshot-testing", defaultBranch: "main",
+    });
+    const second = await resolveOrCreateRepositoryProject(environment, "org_1", {
+      repositoryOwner: "pointfreeco", repositoryName: "swift-snapshot-testing", defaultBranch: "main",
+    });
+    assert.equal(first.created, true);
+    assert.equal(second.created, false);
+    assert.equal(second.id, first.id);
+    assert.equal(suiteWrites, 2, "suite creation stays idempotent at the database constraint");
+  });
+
+  it("rejects malformed repository identities before storage access", async () => {
+    await assert.rejects(resolveOrCreateRepositoryProject({} as never, "org_1", {
+      repositoryOwner: "bad/owner", repositoryName: "repo", defaultBranch: "main",
+    }), /invalid/i);
   });
 });

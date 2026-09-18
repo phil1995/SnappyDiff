@@ -13,7 +13,7 @@ Subscribe to `installation`, `installation_repositories`, `pull_request`, and `p
 
 Store the App private key, webhook secret, and OAuth client secret as `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_OAUTH_CLIENT_SECRET` Worker secrets. Set the public App client ID as `GITHUB_OAUTH_CLIENT_ID`. The Worker exchanges its short-lived App JWT for an installation token; installation and user tokens are never persisted.
 
-Set the callback URL to `<APP_ORIGIN>/github/callback` and enable **Request user authorization (OAuth) during installation**. An organization administrator then selects **Connect GitHub** in SnappyDiff and chooses repositories in GitHub. The Worker verifies the signed tenant state and confirms through the short-lived GitHub user token that the administrator controls the installation. It creates or restores one project per selected repository, synchronizes default branches and installation mappings, and never persists the GitHub user token.
+Set the callback URL to `<APP_ORIGIN>/github/callback` and enable **Request user authorization (OAuth) during installation**. GitHub integration is optional for uploads; it enables pull request checks and secretless OIDC authentication. Projects are also created automatically when their first workspace-key upload arrives.
 
 If OAuth-on-install is disabled, configure the same address as the App's setup URL. SnappyDiff will send the administrator through GitHub authorization as a second step before synchronizing repositories. GitHub documents that the numeric `installation_id` callback parameter is spoofable, so it is never trusted without this user-token ownership check.
 
@@ -34,12 +34,11 @@ steps:
   - name: Upload snapshots
     env:
       SNAPPYDIFF_ENDPOINT: https://staging.example.invalid
-      SNAPPYDIFF_PROJECT: prj_replace_me
       SNAPPYDIFF_OIDC_AUDIENCE: snappydiff-staging
     run: snappydiff upload ./Snapshots --commit "$GITHUB_SHA" --branch "$GITHUB_REF_NAME"
 ```
 
-The CLI requests a GitHub OIDC token for the environment-specific audience and exchanges it for a signed, 15-minute SnappyDiff credential. The Worker verifies the JWT signature, issuer, audience, expiry, repository, workflow run identity, and project/installation mapping. For pull requests it queries the installed repository to classify the head as first-party or fork-origin; fork credentials can create only isolated runs.
+The CLI requests a GitHub OIDC token for the environment-specific audience and exchanges it for a signed, 15-minute SnappyDiff credential. The Worker verifies the JWT signature, issuer, audience, expiry, repository, workflow run identity, and installation mapping, then resolves or creates the repository project. For pull requests it queries the installed repository to classify the head as first-party or fork-origin; fork credentials can create only isolated runs.
 
 ## Check delivery
 

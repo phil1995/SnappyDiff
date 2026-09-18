@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import type { Session } from "./auth.ts";
 import {
-  beginGitHubOnboarding, completeGitHubOnboarding, githubProjectSlug, handleGitHubWebhook, verifyGitHubWebhook,
+  beginGitHubOnboarding, completeGitHubOnboarding, handleGitHubWebhook, verifyGitHubWebhook,
 } from "./github.ts";
 import type { Env } from "./platform.ts";
 
@@ -113,14 +113,7 @@ describe("GitHub-first onboarding", () => {
     assert.ok(authorizationUrl.searchParams.get("state"));
   });
 
-  it("creates API-safe, stable slugs from GitHub repository identities", () => {
-    assert.equal(githubProjectSlug("Snappy Diff!", 12345), "snappy-diff-9ix");
-    const long = githubProjectSlug("A".repeat(100), 12345);
-    assert.match(long, /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/);
-    assert.ok(long.length <= 63);
-  });
-
-  it("preserves inaccessible installed mappings and matches renamed repositories by GitHub ID", async () => {
+  it("syncs authorized installation mappings without creating projects", async () => {
     const database = new FakeDatabase();
     database.projects = [
       { id: "prj_renamed", name: "Custom name", slug: "original", repository_owner: "owner", repository_name: "original", github_repository_id: 101 },
@@ -139,20 +132,15 @@ describe("GitHub-first onboarding", () => {
       const response = await completeGitHubOnboarding(new Request("https://example.test/api/v1/github/installations", {
         method: "POST", body: JSON.stringify({ state, installationId: 77, code: "oauth-code" }),
       }), environment, admin, { requestId: "req_sync", startedAt: 0 });
-      const payload = await response.json() as { projects: Array<{ id: string }> };
-      assert.equal(payload.projects.find((project) => project.id === "prj_renamed")?.id, "prj_renamed");
-      assert.equal(payload.projects.some((project) => project.id !== "prj_renamed"), true);
-      const rename = database.batchStatements.find((statement) => statement.query.includes("UPDATE projects SET repository_owner"));
-      assert.deepEqual(rename?.values.slice(0, 6), ["owner", "renamed", 101, "main", "prj_renamed", "org_1"]);
+      const payload = await response.json() as { repositoryCount: number };
+      assert.equal(payload.repositoryCount, 2);
       const sharedMapping = database.batchStatements.find((statement) => statement.values.at(-1) === "shared"
         && statement.query.includes("UPDATE github_installations"));
       assert.match(sharedMapping?.query ?? "", /suspended_at = NULL/);
       assert.equal(database.batchStatements.some((statement) => statement.query.includes("INSERT INTO github_installations")
         && statement.values.at(-1) === "shared"), false, "OAuth sync must not provision a repository the user cannot administer");
       assert.ok(database.batchStatements[0]?.query.includes("github_installation_owners"));
-      const firstProjectWrite = database.batchStatements.findIndex((statement) => statement.query.includes("UPDATE projects SET"));
-      const firstProjectInsert = database.batchStatements.findIndex((statement) => statement.query.includes("INSERT INTO projects"));
-      assert.ok(firstProjectWrite >= 0 && firstProjectWrite < firstProjectInsert, "renames must happen before reused names are inserted");
+      assert.equal(database.batchStatements.some((statement) => statement.query.includes("projects")), false);
     } finally { globalThis.fetch = originalFetch; }
   });
 

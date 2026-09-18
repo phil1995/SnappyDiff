@@ -5,8 +5,6 @@ import { isAncestor } from "./baselines.ts";
 import { HttpError, json, readJson, type RequestContext } from "./http.ts";
 import type { D1PreparedStatement, Env } from "./platform.ts";
 
-const TOKEN_SCOPES = new Set(["runs:create"]);
-
 export async function getProjectOperations(env: Env, session: Session, projectId: string): Promise<Response> {
   requirePermission(session, "runs:view");
   const project = await env.DB.prepare(`
@@ -216,29 +214,28 @@ export async function updateMember(request: Request, env: Env, session: Session,
   return json({ updated: true });
 }
 
-export async function listTokens(env: Env, session: Session, projectId: string): Promise<Response> {
+export async function listWorkspaceTokens(env: Env, session: Session): Promise<Response> {
   requirePermission(session, "projects:admin");
-  await requireProject(env, session.organizationId, projectId);
   const result = await env.DB.prepare(`
     SELECT id, name, token_prefix AS tokenPrefix, scopes_json AS scopesJson, expires_at AS expiresAt,
       last_used_at AS lastUsedAt, revoked_at AS revokedAt, created_at AS createdAt
-      FROM api_tokens WHERE organization_id = ? AND project_id = ? ORDER BY created_at DESC
-  `).bind(session.organizationId, projectId).all<Record<string, unknown>>();
-  return json({ tokens: (result.results ?? []).map((token) => ({ ...token, scopes: JSON.parse(String(token["scopesJson"])), scopesJson: undefined })) });
+      FROM api_tokens WHERE organization_id = ? AND project_id IS NULL ORDER BY created_at DESC
+  `).bind(session.organizationId).all<Record<string, unknown>>();
+  return json({ tokens: (result.results ?? []).map((token) => ({ ...token,
+    scopes: JSON.parse(String(token["scopesJson"])), scopesJson: undefined })) });
 }
 
-export async function createToken(request: Request, env: Env, session: Session, projectId: string, context: RequestContext): Promise<Response> {
+export async function createWorkspaceToken(request: Request, env: Env, session: Session, context: RequestContext): Promise<Response> {
   requirePermission(session, "projects:admin");
   if (!env.TOKEN_PEPPER || env.TOKEN_PEPPER.length < 32) throw new HttpError(503, "token_authentication_not_configured", "Token creation is not configured");
-  await requireProject(env, session.organizationId, projectId);
-  const body = await readJson<{ name?: unknown; scopes?: unknown; expiresInDays?: unknown }>(request);
-  const name = requiredString(body.name, "name", 100);
-  const scopes = Array.isArray(body.scopes) ? [...new Set(body.scopes.map(String))] : ["runs:create"];
-  if (scopes.length === 0 || scopes.some((scope) => !TOKEN_SCOPES.has(scope))) throw new HttpError(400, "invalid_scopes", "Token scopes are invalid");
-  const expiresInDays = body.expiresInDays === undefined ? 90 : optionalInteger(body.expiresInDays, "expiresInDays", 1, 365)!;
-  const created = await tokenRecord(env, session, projectId, name, scopes, expiresInDays);
-  await audit(env, session, context, "token.created", "api_token", created.id, { projectId, scopes, expiresInDays });
-  return json({ token: created.raw, record: { id: created.id, name, tokenPrefix: created.prefix, scopes, expiresAt: created.expiresAt } }, { status: 201 });
+  const body = await readJson<{ name?: unknown; expiresInDays?: unknown }>(request);
+  const name = body.name === undefined ? "Workspace uploads" : requiredString(body.name, "name", 100);
+  const expiresInDays = body.expiresInDays === undefined ? 365 : optionalInteger(body.expiresInDays, "expiresInDays", 1, 365)!;
+  const scopes = ["runs:create", "projects:bootstrap"];
+  const created = await tokenRecord(env, session, null, name, scopes, expiresInDays);
+  await audit(env, session, context, "workspace_token.created", "api_token", created.id, { scopes, expiresInDays });
+  return json({ token: created.raw, record: { id: created.id, name, tokenPrefix: created.prefix, scopes,
+    expiresAt: created.expiresAt } }, { status: 201 });
 }
 
 export async function revokeToken(env: Env, session: Session, tokenId: string, context: RequestContext): Promise<Response> {
@@ -254,8 +251,8 @@ export async function rotateToken(request: Request, env: Env, session: Session, 
   requirePermission(session, "projects:admin");
   if (!env.TOKEN_PEPPER || env.TOKEN_PEPPER.length < 32) throw new HttpError(503, "token_authentication_not_configured", "Token rotation is not configured");
   const old = await env.DB.prepare("SELECT project_id, name, scopes_json FROM api_tokens WHERE id = ? AND organization_id = ? AND revoked_at IS NULL")
-    .bind(tokenId, session.organizationId).first<{ project_id: string; name: string; scopes_json: string }>();
-  if (!old?.project_id) throw new HttpError(404, "token_not_found", "Active project token was not found");
+    .bind(tokenId, session.organizationId).first<{ project_id: string | null; name: string; scopes_json: string }>();
+  if (!old) throw new HttpError(404, "token_not_found", "Active token was not found");
   const body = await readJson<{ expiresInDays?: unknown }>(request);
   const expiresInDays = body.expiresInDays === undefined ? 90 : optionalInteger(body.expiresInDays, "expiresInDays", 1, 365)!;
   const created = await buildToken(env, session, old.project_id, old.name, JSON.parse(old.scopes_json) as string[], expiresInDays);
@@ -281,13 +278,13 @@ export async function rotateToken(request: Request, env: Env, session: Session, 
   return json({ token: created.raw, record: { id: created.id, name: old.name, tokenPrefix: created.prefix, scopes: JSON.parse(old.scopes_json), expiresAt: created.expiresAt } }, { status: 201 });
 }
 
-async function tokenRecord(env: Env, session: Session, projectId: string, name: string, scopes: string[], expiresInDays: number) {
+async function tokenRecord(env: Env, session: Session, projectId: string | null, name: string, scopes: string[], expiresInDays: number) {
   const created = await buildToken(env, session, projectId, name, scopes, expiresInDays);
   await created.statement.run();
   return created;
 }
 
-async function buildToken(env: Env, session: Session, projectId: string, name: string, scopes: string[], expiresInDays: number) {
+async function buildToken(env: Env, session: Session, projectId: string | null, name: string, scopes: string[], expiresInDays: number) {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
   const raw = `sd_pat_${btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
@@ -300,12 +297,6 @@ async function buildToken(env: Env, session: Session, projectId: string, name: s
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(id, session.organizationId, projectId, name, prefix, hash, JSON.stringify(scopes), expiresAt, session.userId);
   return { id, raw, prefix, expiresAt, hash, statement };
-}
-
-async function requireProject(env: Env, organizationId: string, projectId: string): Promise<void> {
-  const project = await env.DB.prepare("SELECT 1 AS found FROM projects WHERE id = ? AND organization_id = ? AND deleted_at IS NULL")
-    .bind(projectId, organizationId).first();
-  if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
 }
 
 async function audit(env: Env, session: Session, context: RequestContext, action: string, targetType: string, targetId: string, metadata: unknown): Promise<void> {

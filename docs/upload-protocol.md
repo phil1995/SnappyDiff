@@ -1,6 +1,6 @@
 # Upload protocol
 
-The upload protocol is designed for retries and matrix jobs. Every request uses a scoped project token with `runs:create`; the token determines organization and project, so neither can be selected from a request body.
+The upload protocol is designed for retries and matrix jobs. A workspace upload key is exchanged for a short-lived, project-scoped credential after the CLI detects the repository. The service resolves or creates one project per repository inside that workspace.
 
 1. Register an immutable run attempt with provider/build ID, attempt number, commit metadata, and the complete expected shard set. Repeating the same identity returns the existing run; changing any immutable field is a conflict.
 2. Submit each shard manifest in deterministic pages of at most 100 entries and 4 MiB. Each page has an idempotency key and content digest. Screenshot names are normalized relative paths and are unique across the full run.
@@ -13,9 +13,9 @@ Abandoned sessions expire after 24 hours. Cleanup releases reserved bytes and de
 
 ## CLI configuration
 
-Copy `.snappydiff.example.json` to `.snappydiff.json` and commit the non-secret endpoint, project ID, and desired concurrency. Supply `SNAPPYDIFF_TOKEN` only through the CI secret store. Command flags and environment variables override file defaults.
+Copy `.snappydiff.example.json` to `.snappydiff.json` and commit the non-secret endpoint and desired concurrency. Create a workspace upload key in the dashboard and supply it as `SNAPPYDIFF_TOKEN` through the CI secret store. The CLI detects `GITHUB_REPOSITORY` in GitHub Actions and otherwise reads the `origin` Git remote. `SNAPPYDIFF_REPOSITORY=owner/name` is available as an explicit override.
 
-The `login` command is intentionally gated until the WorkOS device-authorization spike in `docs/provider-validation.md` has passed. Project tokens support other CI systems. In GitHub Actions, the CLI automatically uses OIDC when `SNAPPYDIFF_TOKEN` is absent; the live claim/repository-binding gate must pass before that path is enabled outside disposable staging.
+The `login` command is intentionally gated until the WorkOS device-authorization spike in `docs/provider-validation.md` has passed. Workspace keys support other CI systems and automatically group uploads by repository. In GitHub Actions, the CLI automatically uses OIDC when `SNAPPYDIFF_TOKEN` is absent and the GitHub App is connected.
 
 ## Limits
 

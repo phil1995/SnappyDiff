@@ -1,5 +1,3 @@
-import { parseGitHubRepository, projectSetupPath, projectSlug, setProjectFormError } from "./project-form.js";
-
 const root = document.querySelector("#app");
 const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, swipe: .5, blinkTimer: null, worker: null, viewerGeneration: 0, routeGeneration: 0, comparisonId: null };
 
@@ -72,8 +70,7 @@ async function completeGitHubCallback(routeGeneration) {
     });
     if (routeGeneration !== state.routeGeneration) return;
     if (result.authorizationUrl) return location.assign(result.authorizationUrl);
-    const firstProject = result.projects?.[0];
-    return navigate(firstProject ? `/projects/${encodeURIComponent(firstProject.id)}/setup?connected=${result.projects.length}` : "/", true);
+    return navigate("/projects/new?github=connected", true);
   }
   const projectId = callbackState.projectId;
   if (!code) throw new Error("GitHub authorization did not return a code.");
@@ -96,75 +93,47 @@ async function renderHome(routeGeneration) {
   const admin = state.me.user.role === "admin";
   const cards = projects.map((project) => `<a class="card" href="/projects/${encodeURIComponent(project.id)}" data-link><h2>${escapeHtml(project.name)}</h2><div class="repo">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</div><p class="muted">Default branch · ${escapeHtml(project.defaultBranch)}</p></a>`).join("");
   const empty = admin
-    ? `<section class="empty onboarding-empty"><span class="eyebrow">Get started</span><h2>Connect GitHub</h2><p>Choose the repositories that should use SnappyDiff. Projects and their default branches are created automatically.</p><a class="button primary" href="/projects/new" data-link>Connect GitHub</a></section>`
-    : `<div class="empty">No projects are available yet. Ask a workspace administrator to create one.</div>`;
-  root.innerHTML = header(`<section class="hero"><span class="eyebrow">Workspace</span><h1>Your visual changes,<br>in one sharp view.</h1><p>Open a project to inspect recent runs, compare pixels, and resolve snapshot changes.</p></section><div class="section-head"><h2>Projects</h2><div class="section-actions"><span class="muted">${projects.length} total</span>${admin && projects.length ? `<a class="button primary" href="/projects/new" data-link>Sync GitHub repositories</a>` : ""}</div></div>${cards ? `<div class="grid">${cards}</div>` : empty}`);
+    ? `<section class="empty onboarding-empty"><span class="eyebrow">Get started</span><h2>Upload your first snapshots</h2><p>Create one workspace key, add it to CI, and run the uploader. SnappyDiff detects the repository and creates its project automatically.</p><a class="button primary" href="/projects/new" data-link>Set up uploads</a></section>`
+    : `<div class="empty">No projects are available yet. A project appears after its first snapshot upload.</div>`;
+  root.innerHTML = header(`<section class="hero"><span class="eyebrow">Workspace</span><h1>Your visual changes,<br>in one sharp view.</h1><p>Open a project to inspect recent runs, compare pixels, and resolve snapshot changes.</p></section><div class="section-head"><h2>Projects</h2><div class="section-actions"><span class="muted">${projects.length} total</span>${admin ? `<a class="button primary" href="/projects/new" data-link>Upload setup</a>` : ""}</div></div>${cards ? `<div class="grid">${cards}</div>` : empty}`);
 }
 
-function renderNewProject(routeGeneration) {
+async function renderNewProject(routeGeneration) {
   if (state.me.user.role !== "admin") throw new Error("Only workspace administrators can create projects.");
-  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Connect GitHub</span></nav><section class="onboarding"><div class="onboarding-copy"><span class="eyebrow">Repository setup</span><h1>Connect GitHub once.</h1><p>Select one or more repositories on GitHub. SnappyDiff creates the matching projects, reads their default branches, and enables pull request checks automatically.</p><ol class="setup-steps"><li><span>1</span><div><strong>Choose repositories</strong><small>GitHub shows exactly what the App can access.</small></div></li><li><span>2</span><div><strong>Projects appear here</strong><small>No names, URLs, branches, or installation IDs to copy.</small></div></li><li><span>3</span><div><strong>Add the CI step</strong><small>SnappyDiff gives you configuration for the connected project.</small></div></li></ol></div><div class="project-form connect-card"><div class="github-mark" aria-hidden="true">GH</div><h2>Install the SnappyDiff GitHub App</h2><p>GitHub will ask which account and repositories you want to connect. You can change the selection later.</p><div class="form-error" data-github-error role="alert" hidden></div><button class="button primary connect-button" data-github-connect>Choose repositories on GitHub</button><p class="privacy-note">SnappyDiff receives repository metadata and check events. It does not read your source files.</p><details><summary>Connect without the GitHub App</summary><form data-project-create><label>Project name<input name="name" maxlength="100" required placeholder="My iOS App"></label><label>GitHub repository<input name="repository" required autocomplete="off" spellcheck="false" placeholder="owner/repository"></label><label>Default branch<input name="defaultBranch" maxlength="255" required value="main" spellcheck="false"></label><div class="form-error" data-project-error role="alert" hidden></div><button class="button" type="submit">Create manual project</button></form></details></div></section>`);
-  root.querySelector("[data-github-connect]").addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    const error = root.querySelector("[data-github-error]");
-    button.disabled = true;
-    button.textContent = "Opening GitHub…";
-    error.hidden = true;
-    try {
-      const result = await api("/api/v1/github/installations/authorize", { method: "POST", body: "{}" });
-      if (routeGeneration === state.routeGeneration) location.assign(result.installationUrl);
-    } catch (failure) {
-      error.textContent = failure.message; error.hidden = false; button.disabled = false; button.textContent = "Choose repositories on GitHub";
-    }
-  });
-  const form = root.querySelector("[data-project-create]");
-  const nameInput = form.elements.name;
-  const repositoryInput = form.elements.repository;
-  repositoryInput.addEventListener("change", () => {
-    if (nameInput.value.trim()) return;
-    try { nameInput.value = parseGitHubRepository(repositoryInput.value).repositoryName; }
-    catch { /* Submission shows the actionable validation message. */ }
-  });
-  form.addEventListener("submit", async (event) => {
+  const { tokens } = await api("/api/v1/workspace-tokens");
+  if (routeGeneration !== state.routeGeneration) return;
+  const activeTokens = tokens.filter((token) => !token.revokedAt);
+  const tokenRows = tokens.map((token) => `<div class="management-row"><div><strong>${escapeHtml(token.name)}</strong><small>${escapeHtml(token.tokenPrefix)}… · expires ${formatDate(token.expiresAt)}${token.revokedAt ? " · revoked" : ""}</small></div>${token.revokedAt ? "" : `<button class="button danger" data-revoke-workspace-token="${escapeHtml(token.id)}">Revoke</button>`}</div>`).join("");
+  const configuration = JSON.stringify({ endpoint: state.me.configuration.appOrigin, uploadConcurrency: 4 }, null, 2);
+  const workflow = `- name: Upload snapshots\n  env:\n    SNAPPYDIFF_TOKEN: \${{ secrets.SNAPPYDIFF_TOKEN }}\n  run: snappydiff upload ./Snapshots`;
+  const connected = new URLSearchParams(location.search).get("github") === "connected";
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Upload setup</span></nav><section class="setup-complete"><span class="eyebrow">Upload-first setup</span><h1>One key. Any repository.</h1><p>Add the workspace key to CI. The first upload detects its repository and creates the project automatically.</p>${connected ? `<div class="success-mark">✓</div><p>GitHub is connected for pull request checks.</p>` : ""}</section><div class="setup-grid"><section class="settings-card"><span class="step-label">1 · Workspace secret</span><h2>SNAPPYDIFF_TOKEN</h2><p class="muted">The key can upload from multiple repositories. Each repository becomes its own project.</p><form data-workspace-token-create><label>Key name<input name="name" maxlength="100" value="CI uploads" required></label><label>Expiry days<input name="expiresInDays" type="number" min="1" max="365" value="365"></label><button class="button primary">Create workspace key</button></form><div data-workspace-token-secret></div><p class="muted">${activeTokens.length} active workspace ${activeTokens.length === 1 ? "key" : "keys"}.</p><div>${tokenRows}</div></section><section class="settings-card"><span class="step-label">2 · Commit this file</span><h2>.snappydiff.json</h2><pre><code>${escapeHtml(configuration)}</code></pre></section><section class="settings-card wide"><span class="step-label">3 · Add after snapshot tests</span><h2>GitHub Actions</h2><pre><code>${escapeHtml(workflow)}</code></pre><p class="muted">Replace the snapshot directory with the directory produced by your tests.</p></section><section class="settings-card wide"><h2>Optional GitHub integration</h2><p class="muted">Connect the GitHub App for pull request checks and secretless OIDC uploads. It is not required to create projects or upload snapshots.</p><button class="button" data-github-connect>Connect or sync GitHub</button></section></div>`);
+  root.querySelector("[data-workspace-token-create]").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const button = event.submitter;
-    setProjectFormError(form);
-    button.disabled = true;
-    button.textContent = "Creating…";
-    try {
-      const values = new FormData(form);
-      const name = String(values.get("name") ?? "").trim();
-      const repository = parseGitHubRepository(values.get("repository"));
-      const result = await api("/api/v1/projects", {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          slug: projectSlug(name, repository.repositoryName),
-          ...repository,
-          defaultBranch: String(values.get("defaultBranch") ?? "").trim(),
-        }),
-      });
-      const destination = projectSetupPath(result.project.id, routeGeneration, state.routeGeneration);
-      if (destination) navigate(destination, true);
-    } catch (failure) {
-      setProjectFormError(form, failure.message);
-      button.disabled = false;
-      button.textContent = "Create project";
-    }
+    const form = new FormData(event.currentTarget);
+    const result = await settingsAction(event.submitter, () => api("/api/v1/workspace-tokens", { method: "POST", body: JSON.stringify({ name: form.get("name"), expiresInDays: Number(form.get("expiresInDays")) }) }));
+    if (result && routeGeneration === state.routeGeneration) root.querySelector("[data-workspace-token-secret]").innerHTML = `<div class="secret"><strong>Copy now—shown once</strong><code>${escapeHtml(result.token)}</code></div>`;
   });
+  root.querySelector("[data-github-connect]").addEventListener("click", async (event) => {
+    const result = await settingsAction(event.currentTarget, () => api("/api/v1/github/installations/authorize", { method: "POST", body: "{}" }));
+    if (result) location.assign(result.installationUrl);
+  });
+  root.querySelectorAll("[data-revoke-workspace-token]").forEach((button) => button.addEventListener("click", async () => {
+    await settingsAction(button, () => api(`/api/v1/tokens/${encodeURIComponent(button.dataset.revokeWorkspaceToken)}`, { method: "DELETE" }));
+    if (routeGeneration === state.routeGeneration) await renderNewProject(routeGeneration);
+  }));
 }
 
 async function renderProjectSetup(projectId, routeGeneration) {
   const { project } = await api(`/api/v1/projects/${encodeURIComponent(projectId)}`);
   if (routeGeneration !== state.routeGeneration) return;
   if (!project.githubConnected) {
-    root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Setup</span></nav><section class="setup-complete"><span class="eyebrow">Manual project</span><h1>Choose an upload credential.</h1><p>This project is not connected to the GitHub App, so GitHub OIDC is unavailable. Create a scoped project token and store it as <code>SNAPPYDIFF_TOKEN</code> in your CI secret store.</p><a class="button primary" href="/projects/${encodeURIComponent(project.id)}/settings" data-link>Create project token</a></section>`);
+    root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Setup</span></nav><section class="setup-complete"><span class="eyebrow">Workspace uploads</span><h1>This project is created automatically.</h1><p>Use a workspace upload key in CI. SnappyDiff detects this repository and routes uploads here without a project ID.</p><a class="button primary" href="/projects/new" data-link>Open upload setup</a></section>`);
     return;
   }
   const connected = Number(new URLSearchParams(location.search).get("connected") || 1);
   const configuration = JSON.stringify({
     endpoint: state.me.configuration.appOrigin,
-    project: project.id,
     uploadConcurrency: 4,
     oidcAudience: state.me.configuration.oidcAudience,
   }, null, 2);
@@ -195,18 +164,16 @@ async function renderProject(projectId, routeGeneration) {
 
 async function renderSettings(projectId, routeGeneration) {
   const admin = state.me.user.role === "admin";
-  const [operations, tokenPayload, memberPayload] = await Promise.all([
+  const [operations, memberPayload] = await Promise.all([
     api(`/api/v1/projects/${encodeURIComponent(projectId)}/settings`),
-    admin ? api(`/api/v1/projects/${encodeURIComponent(projectId)}/tokens`) : Promise.resolve({ tokens: [] }),
     admin ? api("/api/v1/members") : Promise.resolve({ members: [] }),
   ]);
   if (routeGeneration !== state.routeGeneration) return;
   const project = operations.project;
   const warningHtml = operations.retentionWarnings.map((warning) => `<div class="warning">PR #${warning.number} retention is preserved because GitHub state could not be reconciled. ${escapeHtml(warning.reconciliationError || "")}</div>`).join("");
   const history = operations.baselineHistory.map((item) => `<div class="history-row"><span class="pill">${escapeHtml(item.action)}</span><span class="sha">${escapeHtml(shortSha(item.commitSha))}</span><span>${escapeHtml(item.actorEmail || "automation")}</span><time>${formatDate(item.createdAt)}</time></div>`).join("");
-  const tokens = tokenPayload.tokens.map((token) => `<div class="management-row"><div><strong>${escapeHtml(token.name)}</strong><small>${escapeHtml(token.tokenPrefix)}… · expires ${formatDate(token.expiresAt)}${token.revokedAt ? " · revoked" : ""}</small></div>${token.revokedAt ? "" : `<div><button class="button" data-rotate-token="${escapeHtml(token.id)}">Rotate</button> <button class="button danger" data-revoke-token="${escapeHtml(token.id)}">Revoke</button></div>`}</div>`).join("");
   const members = memberPayload.members.map((member) => `<div class="management-row"><div><strong>${escapeHtml(member.email)}</strong><small>${escapeHtml(member.displayName)}</small></div><div><select data-member-role="${escapeHtml(member.id)}"><option ${member.role === "viewer" ? "selected" : ""}>viewer</option><option ${member.role === "reviewer" ? "selected" : ""}>reviewer</option><option ${member.role === "admin" ? "selected" : ""}>admin</option></select> <select data-member-status="${escapeHtml(member.id)}"><option ${member.status === "active" ? "selected" : ""}>active</option><option ${member.status === "suspended" ? "selected" : ""}>suspended</option></select></div></div>`).join("");
-  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(projectId)}" data-link>${escapeHtml(project.name)}</a><span>/</span><span>Settings</span></nav><span class="eyebrow">Operations</span><h1>${escapeHtml(project.name)}</h1>${warningHtml}<div class="settings-grid"><section class="settings-card"><h2>Project</h2><form data-project-settings><label>Name<input name="name" value="${escapeHtml(project.name)}" required maxlength="100"></label><label>Default branch<input name="defaultBranch" value="${escapeHtml(project.defaultBranch)}" required maxlength="255"></label><div class="field-pair"><label>Artifact days<input name="retentionDays" type="number" min="1" max="3650" value="${project.retentionDays}"></label><label>Promoted days<input name="promotedRetentionDays" type="number" min="365" max="3650" value="${project.promotedRetentionDays}"></label></div><button class="button primary" ${admin ? "" : "disabled"}>Save settings</button></form></section><section class="settings-card"><h2>Baseline control</h2><p class="muted">Active <span class="sha">${escapeHtml(shortSha(project.activeBaselineSha) || "none")}</span> · mode ${escapeHtml(project.promotionMode)}${project.rollbackSha ? ` · rollback ${escapeHtml(shortSha(project.rollbackSha))}` : ""}</p><div class="decision"><button class="button" data-baseline-action="pause" ${admin ? "" : "disabled"}>Pause</button><button class="button primary" data-baseline-action="resume" ${admin ? "" : "disabled"}>Resume</button><button class="button" data-baseline-action="clear_rollback" ${admin ? "" : "disabled"}>Clear rollback</button></div><label>Run ID for rollback or history reset<input data-baseline-run placeholder="run_…" ${admin ? "" : "disabled"}></label><div class="decision"><button class="button" data-baseline-action="rollback" ${admin ? "" : "disabled"}>Rollback view</button><button class="button danger" data-baseline-action="history_reset" ${admin ? "" : "disabled"}>Confirm history reset</button></div></section><section class="settings-card wide"><h2>Baseline history</h2>${history || `<div class="empty">No baseline history yet.</div>`}</section>${admin ? `<section class="settings-card"><h2>Project tokens</h2><form data-token-create><label>Name<input name="name" required maxlength="100" placeholder="CI upload"></label><label>Expiry days<input name="expiresInDays" type="number" min="1" max="365" value="90"></label><button class="button primary">Create scoped token</button></form><div data-token-secret></div><div>${tokens || `<p class="muted">No tokens.</p>`}</div></section><section class="settings-card"><h2>GitHub installation</h2><form data-github-link><label>Installation ID<input name="installationId" type="number" min="1" required></label><button class="button">Authorize and link</button></form><p class="muted">GitHub authorization verifies that you administer this repository before linking.</p></section><section class="settings-card wide"><h2>Members</h2>${members}</section>` : ""}</div>`);
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(projectId)}" data-link>${escapeHtml(project.name)}</a><span>/</span><span>Settings</span></nav><span class="eyebrow">Operations</span><h1>${escapeHtml(project.name)}</h1>${warningHtml}<div class="settings-grid"><section class="settings-card"><h2>Project</h2><form data-project-settings><label>Name<input name="name" value="${escapeHtml(project.name)}" required maxlength="100"></label><label>Default branch<input name="defaultBranch" value="${escapeHtml(project.defaultBranch)}" required maxlength="255"></label><div class="field-pair"><label>Artifact days<input name="retentionDays" type="number" min="1" max="3650" value="${project.retentionDays}"></label><label>Promoted days<input name="promotedRetentionDays" type="number" min="365" max="3650" value="${project.promotedRetentionDays}"></label></div><button class="button primary" ${admin ? "" : "disabled"}>Save settings</button></form></section><section class="settings-card"><h2>Baseline control</h2><p class="muted">Active <span class="sha">${escapeHtml(shortSha(project.activeBaselineSha) || "none")}</span> · mode ${escapeHtml(project.promotionMode)}${project.rollbackSha ? ` · rollback ${escapeHtml(shortSha(project.rollbackSha))}` : ""}</p><div class="decision"><button class="button" data-baseline-action="pause" ${admin ? "" : "disabled"}>Pause</button><button class="button primary" data-baseline-action="resume" ${admin ? "" : "disabled"}>Resume</button><button class="button" data-baseline-action="clear_rollback" ${admin ? "" : "disabled"}>Clear rollback</button></div><label>Run ID for rollback or history reset<input data-baseline-run placeholder="run_…" ${admin ? "" : "disabled"}></label><div class="decision"><button class="button" data-baseline-action="rollback" ${admin ? "" : "disabled"}>Rollback view</button><button class="button danger" data-baseline-action="history_reset" ${admin ? "" : "disabled"}>Confirm history reset</button></div></section><section class="settings-card wide"><h2>Baseline history</h2>${history || `<div class="empty">No baseline history yet.</div>`}</section>${admin ? `<section class="settings-card"><h2>GitHub installation</h2><form data-github-link><label>Installation ID<input name="installationId" type="number" min="1" required></label><button class="button">Authorize and link</button></form><p class="muted">GitHub authorization verifies that you administer this repository before linking.</p></section><section class="settings-card wide"><h2>Members</h2>${members}</section>` : ""}</div>`);
   const githubCard = root.querySelector("[data-github-link]")?.closest(".settings-card");
   if (githubCard) githubCard.innerHTML = `<h2>GitHub repositories</h2><p class="muted">Authorize repository changes after updating the GitHub App installation.</p><button class="button" data-github-connect>Sync GitHub repositories</button>`;
   bindSettings(projectId, routeGeneration);
@@ -221,13 +188,6 @@ function bindSettings(projectId, routeGeneration) {
     await settingsAction(button, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/baseline-control`, { method: "POST", body: JSON.stringify({ action: button.dataset.baselineAction, runId: root.querySelector("[data-baseline-run]").value || undefined }) }));
     if (routeGeneration === state.routeGeneration) await renderSettings(projectId, routeGeneration);
   });
-  root.querySelector("[data-token-create]")?.addEventListener("submit", async (event) => {
-    event.preventDefault(); const form = new FormData(event.currentTarget);
-    const result = await settingsAction(event.submitter, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/tokens`, { method: "POST", body: JSON.stringify({ name: form.get("name"), scopes: ["runs:create"], expiresInDays: Number(form.get("expiresInDays")) }) }));
-    if (result && routeGeneration === state.routeGeneration) root.querySelector("[data-token-secret]").innerHTML = `<div class="secret"><strong>Copy now—shown once</strong><code>${escapeHtml(result.token)}</code></div>`;
-  });
-  root.querySelectorAll("[data-revoke-token]").forEach((button) => button.onclick = async () => { await settingsAction(button, () => api(`/api/v1/tokens/${encodeURIComponent(button.dataset.revokeToken)}`, { method: "DELETE" })); if (routeGeneration === state.routeGeneration) await renderSettings(projectId, routeGeneration); });
-  root.querySelectorAll("[data-rotate-token]").forEach((button) => button.onclick = async () => { const result = await settingsAction(button, () => api(`/api/v1/tokens/${encodeURIComponent(button.dataset.rotateToken)}/rotate`, { method: "POST", body: "{}" })); if (result && routeGeneration === state.routeGeneration) { await renderSettings(projectId, routeGeneration); root.querySelector("[data-token-secret]").innerHTML = `<div class="secret"><strong>Replacement token—copy now</strong><code>${escapeHtml(result.token)}</code></div>`; } });
   root.querySelectorAll("[data-member-role], [data-member-status]").forEach((select) => select.onchange = async () => { const userId = select.dataset.memberRole || select.dataset.memberStatus; const role = root.querySelector(`[data-member-role="${CSS.escape(userId)}"]`).value; const status = root.querySelector(`[data-member-status="${CSS.escape(userId)}"]`).value; await settingsAction(select, () => api(`/api/v1/members/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ role, status }) })); });
   root.querySelector("[data-github-connect]")?.addEventListener("click", async (event) => { const result = await settingsAction(event.currentTarget, () => api("/api/v1/github/installations/authorize", { method: "POST", body: "{}" })); if (result) location.assign(result.installationUrl); });
 }

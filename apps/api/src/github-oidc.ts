@@ -1,8 +1,10 @@
 import { randomId, signJson } from "./crypto.ts";
-import { classifyPullRequestFork } from "./github.ts";
+import { classifyPullRequestFork, githubRequest } from "./github.ts";
 import { HttpError, json, readJson } from "./http.ts";
 import type { Env } from "./platform.ts";
 import type { OidcMachineGrant } from "./machine-auth.ts";
+import { resolveOrCreateRepositoryProject, type RepositoryProject } from "./projects.ts";
+import { requireOrganizationWritable } from "./privacy.ts";
 
 interface GitHubClaims {
   iss?: string;
@@ -77,21 +79,10 @@ export async function exchangeGitHubOidc(request: Request, env: Env): Promise<Re
   if (!env.TOKEN_PEPPER || env.TOKEN_PEPPER.length < 32) throw new HttpError(503, "token_authentication_not_configured", "OIDC exchange is not configured");
   const authorization = request.headers.get("authorization") ?? "";
   if (!authorization.startsWith("Bearer ")) throw new HttpError(401, "oidc_token_required", "GitHub OIDC bearer token is required");
-  const body = await readJson<{ projectId?: unknown; pullRequestNumber?: unknown }>(request);
-  if (typeof body.projectId !== "string") throw new HttpError(400, "invalid_project", "projectId is required");
+  const body = await readJson<{ pullRequestNumber?: unknown }>(request);
   const claims = await verifyGitHubOidc(authorization.slice("Bearer ".length), env.GITHUB_OIDC_AUDIENCE);
   const repositoryClaim = claims.repository!;
-  const project = await env.DB.prepare(`
-    SELECT p.id, p.organization_id, p.repository_owner, p.repository_name FROM projects p
-     WHERE p.id = ? AND p.deleted_at IS NULL AND EXISTS (
-       SELECT 1 FROM github_installations i WHERE i.organization_id = p.organization_id
-         AND i.repository_owner = p.repository_owner AND i.repository_name = p.repository_name
-         AND i.suspended_at IS NULL
-     )
-  `).bind(body.projectId).first<{ id: string; organization_id: string; repository_owner: string; repository_name: string }>();
-  if (!project || repositoryClaim.toLowerCase() !== `${project.repository_owner}/${project.repository_name}`.toLowerCase()) {
-    throw new HttpError(403, "repository_binding_failed", "OIDC repository is not authorized for this project");
-  }
+  const project = await resolveOidcProject(env, repositoryClaim, claims.repository_id);
   const attemptNumber = Number(claims.run_attempt);
   if (!Number.isSafeInteger(attemptNumber) || attemptNumber < 1 || !/^\d+$/.test(claims.run_id!)) {
     throw new HttpError(401, "invalid_oidc_token", "OIDC workflow identity is invalid");
@@ -109,9 +100,9 @@ export async function exchangeGitHubOidc(request: Request, env: Env): Promise<Re
     const installation = await env.DB.prepare(`
       SELECT installation_id FROM github_installations WHERE organization_id = ?
        AND repository_owner = ? AND repository_name = ? AND suspended_at IS NULL LIMIT 1
-    `).bind(project.organization_id, project.repository_owner, project.repository_name).first<{ installation_id: number }>();
+    `).bind(project.organizationId, project.repositoryOwner, project.repositoryName).first<{ installation_id: number }>();
     if (!installation) throw new HttpError(403, "github_installation_required", "A GitHub App installation is required for pull request authentication");
-    const pull = await classifyPullRequestFork(env, installation.installation_id, project.repository_owner, project.repository_name, pullRequestNumber);
+    const pull = await classifyPullRequestFork(env, installation.installation_id, project.repositoryOwner, project.repositoryName, pullRequestNumber);
     if (pull.state !== "open") throw new HttpError(403, "pull_request_closed", "Closed pull requests cannot exchange upload credentials");
     if (claims.sha !== pull.headSha && claims.sha !== pull.mergeCommitSha) {
       throw new HttpError(403, "commit_binding_failed", "OIDC commit does not match the current pull request");
@@ -125,7 +116,7 @@ export async function exchangeGitHubOidc(request: Request, env: Env): Promise<Re
         installation_id = excluded.installation_id, github_updated_at = excluded.github_updated_at,
         state_version = pull_requests.state_version + 1, updated_at = unixepoch()
       WHERE excluded.github_updated_at >= pull_requests.github_updated_at
-    `).bind(project.organization_id, project.id, pullRequestNumber, pull.headSha, pull.baseSha,
+    `).bind(project.organizationId, project.id, pullRequestNumber, pull.headSha, pull.baseSha,
       installation.installation_id, pull.updatedAt).run();
     if (claims.sub !== `repo:${repositoryClaim}:pull_request`) {
       throw new HttpError(403, "subject_binding_failed", "OIDC subject does not match the pull request workflow");
@@ -137,7 +128,7 @@ export async function exchangeGitHubOidc(request: Request, env: Env): Promise<Re
   }
   const expiresAt = Math.min(claims.exp!, Math.floor(Date.now() / 1000) + 15 * 60);
   const grant: OidcMachineGrant = {
-    tokenId: randomId("oidc"), organizationId: project.organization_id, projectId: project.id,
+    tokenId: randomId("oidc"), organizationId: project.organizationId, projectId: project.id,
     scopes: ["runs:create"], trustClass, exp: expiresAt,
     runConstraints: {
       providerRunId: claims.run_id!, attemptNumber, commitSha: claims.sha!,
@@ -146,5 +137,65 @@ export async function exchangeGitHubOidc(request: Request, env: Env): Promise<Re
       ...(pullRequestHeadSha === undefined ? {} : { pullRequestHeadSha }),
     },
   };
-  return json({ token: `sd_oidc_${await signJson(grant, env.TOKEN_PEPPER)}`, expiresAt, trustClass, runConstraints: grant.runConstraints });
+  return json({ token: `sd_oidc_${await signJson(grant, env.TOKEN_PEPPER)}`, projectId: project.id,
+    expiresAt, trustClass, runConstraints: grant.runConstraints });
+}
+
+async function resolveOidcProject(
+  env: Env,
+  repositoryClaim: string,
+  repositoryIdClaim: string | undefined,
+): Promise<RepositoryProject> {
+  const [repositoryOwner, repositoryName, extra] = repositoryClaim.split("/");
+  const repositoryId = Number(repositoryIdClaim);
+  if (!repositoryOwner || !repositoryName || extra || !Number.isSafeInteger(repositoryId) || repositoryId <= 0) {
+    throw new HttpError(401, "invalid_oidc_token", "OIDC repository identity is invalid");
+  }
+  const installation = await env.DB.prepare(`
+    SELECT owner.installation_id, owner.organization_id, owner.account_login
+      FROM github_installation_owners owner
+      LEFT JOIN github_installations mapping ON mapping.installation_id = owner.installation_id
+        AND mapping.organization_id = owner.organization_id
+        AND lower(mapping.repository_owner) = lower(?) AND lower(mapping.repository_name) = lower(?)
+     WHERE (mapping.suspended_at IS NULL AND mapping.id IS NOT NULL)
+        OR lower(owner.account_login) = lower(?)
+     ORDER BY CASE WHEN mapping.id IS NOT NULL THEN 0 ELSE 1 END LIMIT 1
+  `).bind(repositoryOwner, repositoryName, repositoryOwner).first<{
+    installation_id: number; organization_id: string; account_login: string;
+  }>();
+  if (!installation) {
+    throw new HttpError(403, "workspace_binding_required", "Install the SnappyDiff GitHub App for this repository or use a workspace upload key");
+  }
+  await requireOrganizationWritable(env, installation.organization_id);
+  let repository: { id: number; name: string; default_branch: string; owner: { login: string } };
+  try {
+    repository = await githubRequest(env,
+      `/repos/${encodeURIComponent(repositoryOwner)}/${encodeURIComponent(repositoryName)}`, {}, installation.installation_id);
+  } catch {
+    throw new HttpError(403, "repository_binding_failed", "The GitHub App installation cannot access this repository");
+  }
+  if (repository.id !== repositoryId || repository.owner.login.toLowerCase() !== repositoryOwner.toLowerCase()
+    || repository.name.toLowerCase() !== repositoryName.toLowerCase()) {
+    throw new HttpError(403, "repository_binding_failed", "GitHub repository identity did not match the workflow token");
+  }
+  const project = await resolveOrCreateRepositoryProject(env, installation.organization_id, {
+    repositoryOwner: repository.owner.login,
+    repositoryName: repository.name,
+    defaultBranch: repository.default_branch,
+    githubRepositoryId: repository.id,
+  });
+  if (project.created) {
+    await env.DB.prepare(`INSERT INTO audit_events
+      (id, organization_id, action, target_type, target_id, request_id, metadata_json)
+      VALUES (?, ?, 'project.created_from_oidc', 'project', ?, ?, ?)`)
+      .bind(randomId("aud"), installation.organization_id, project.id, randomId("req"),
+        JSON.stringify({ repository: `${project.repositoryOwner}/${project.repositoryName}` })).run();
+  }
+  await env.DB.prepare(`INSERT INTO github_installations
+    (id, organization_id, installation_id, account_login, repository_owner, repository_name)
+    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)
+    DO UPDATE SET account_login = excluded.account_login, suspended_at = NULL, updated_at = unixepoch()`)
+    .bind(randomId("ghi"), installation.organization_id, installation.installation_id, installation.account_login,
+      repository.owner.login, repository.name).run();
+  return project;
 }

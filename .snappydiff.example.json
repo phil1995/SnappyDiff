@@ -1,6 +1,5 @@
 {
   "endpoint": "http://localhost:8787",
-  "project": "replace-with-project-id",
   "uploadConcurrency": 4,
   "oidcAudience": "snappydiff"
 }

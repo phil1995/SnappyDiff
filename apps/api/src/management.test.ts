@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Session } from "./auth.ts";
-import { createToken, updateMember } from "./management.ts";
+import { createWorkspaceToken, updateMember } from "./management.ts";
 
 const admin: Session = {
   userId: "usr_1", externalUserId: "external", organizationId: "org_1",
@@ -10,20 +10,21 @@ const admin: Session = {
 const context = { requestId: "req_1", startedAt: 0 };
 
 describe("project management", () => {
-  it("never persists the raw value of a newly issued token", async () => {
+  it("issues workspace keys without binding them to a project", async () => {
     const bindings: unknown[][] = [];
     const statement = {
       bind: (...values: unknown[]) => { bindings.push(values); return statement; },
-      first: async () => ({ found: 1 }),
       run: async () => ({ success: true, meta: { changes: 1 } }),
     };
     const environment = { TOKEN_PEPPER: "p".repeat(32), DB: { prepare: () => statement } } as never;
-    const request = new Request("https://example.test/api/v1/projects/prj_1/tokens", {
-      method: "POST", body: JSON.stringify({ name: "CI", scopes: ["runs:create"], expiresInDays: 30 }),
+    const request = new Request("https://example.test/api/v1/workspace-tokens", {
+      method: "POST", body: JSON.stringify({ name: "All CI", expiresInDays: 365 }),
     });
-    const response = await createToken(request, environment, admin, "prj_1", context);
-    const payload = await response.json() as { token: string };
+    const response = await createWorkspaceToken(request, environment, admin, context);
+    const payload = await response.json() as { token: string; record: { scopes: string[] } };
     assert.match(payload.token, /^sd_pat_/);
+    assert.deepEqual(payload.record.scopes, ["runs:create", "projects:bootstrap"]);
+    assert.equal(bindings.some((values) => values[2] === null && values.includes("All CI")), true);
     assert.equal(bindings.flat().includes(payload.token), false);
   });
 

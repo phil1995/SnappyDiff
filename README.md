@@ -28,7 +28,7 @@ npm test
 
 Local D1 and R2 emulation use Wrangler and do not require cloud credentials. See `docs/deployment.md` before creating remote resources or secrets.
 
-The CLI reads non-secret defaults from a checked-in `.snappydiff.json` (start from `.snappydiff.example.json`). Supply project tokens only through `SNAPPYDIFF_TOKEN`; never place them in the configuration file or command history.
+The CLI reads non-secret defaults from a checked-in `.snappydiff.json` (start from `.snappydiff.example.json`). Supply workspace upload keys only through `SNAPPYDIFF_TOKEN`; never place them in the configuration file or command history. The first upload detects the repository and creates its project automatically.
 
 The complete retry, sharding, deduplication, and verification contract is documented in `docs/upload-protocol.md`.
 Baseline recovery, scoped-token rotation, PR pin reconciliation, and retention cleanup are documented in `docs/operations.md`.

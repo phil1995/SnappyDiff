@@ -1,19 +1,83 @@
 import type { Session } from "./auth.ts";
 import { requirePermission } from "./authorization.ts";
 import { randomId } from "./crypto.ts";
-import { HttpError, json, readJson, type RequestContext } from "./http.ts";
+import { HttpError, json } from "./http.ts";
 import type { Env } from "./platform.ts";
 
-interface CreateProjectBody {
-  name?: unknown;
-  slug?: unknown;
-  repositoryOwner?: unknown;
-  repositoryName?: unknown;
-  defaultBranch?: unknown;
+const REPOSITORY_PART = /^[A-Za-z0-9_.-]{1,100}$/;
+
+export interface RepositoryProjectInput {
+  repositoryOwner: string;
+  repositoryName: string;
+  defaultBranch: string;
+  githubRepositoryId?: number;
 }
 
-const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const REPOSITORY_PART = /^[A-Za-z0-9_.-]{1,100}$/;
+export interface RepositoryProject {
+  id: string;
+  organizationId: string;
+  repositoryOwner: string;
+  repositoryName: string;
+  created: boolean;
+}
+
+export async function resolveOrCreateRepositoryProject(
+  env: Env,
+  organizationId: string,
+  input: RepositoryProjectInput,
+): Promise<RepositoryProject> {
+  if (!REPOSITORY_PART.test(input.repositoryOwner) || !REPOSITORY_PART.test(input.repositoryName)
+    || !input.defaultBranch || input.defaultBranch.length > 255
+    || (input.githubRepositoryId !== undefined && (!Number.isSafeInteger(input.githubRepositoryId) || input.githubRepositoryId <= 0))) {
+    throw new HttpError(400, "invalid_repository", "Repository identity is invalid");
+  }
+  const find = () => env.DB.prepare(`
+    SELECT id, organization_id, repository_owner, repository_name FROM projects
+     WHERE organization_id = ? AND (
+       (? IS NOT NULL AND github_repository_id = ?)
+       OR (lower(repository_owner) = lower(?) AND lower(repository_name) = lower(?))
+     ) LIMIT 1
+  `).bind(organizationId, input.githubRepositoryId ?? null, input.githubRepositoryId ?? null,
+    input.repositoryOwner, input.repositoryName).first<{
+      id: string; organization_id: string; repository_owner: string; repository_name: string;
+    }>();
+  let project = await find();
+  let created = false;
+  if (!project) {
+    const projectId = randomId("prj");
+    const slugSuffix = input.githubRepositoryId?.toString(36) ?? projectId.slice(-10).toLowerCase();
+    const slugBase = input.repositoryName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "repository";
+    const slug = `${slugBase.slice(0, Math.max(1, 62 - slugSuffix.length)).replace(/-+$/g, "")}-${slugSuffix}`;
+    try {
+      const result = await env.DB.prepare(`INSERT INTO projects
+        (id, organization_id, name, slug, repository_owner, repository_name, github_repository_id, default_branch)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind(projectId, organizationId, input.repositoryName, slug, input.repositoryOwner, input.repositoryName,
+          input.githubRepositoryId ?? null, input.defaultBranch).run();
+      created = Number(result.meta?.["changes"] ?? 0) === 1;
+    } catch (error) {
+      if (!String(error).includes("UNIQUE")) throw error;
+    }
+    project = await find();
+    if (!project) throw new HttpError(409, "project_conflict", "The repository conflicts with an existing project");
+  } else {
+    await env.DB.prepare(`UPDATE projects SET repository_owner = ?, repository_name = ?,
+      github_repository_id = COALESCE(?, github_repository_id), default_branch = ?, deleted_at = NULL,
+      updated_at = unixepoch() WHERE id = ? AND organization_id = ?`)
+      .bind(input.repositoryOwner, input.repositoryName, input.githubRepositoryId ?? null, input.defaultBranch,
+        project.id, organizationId).run();
+  }
+  await env.DB.prepare(`INSERT INTO suites (id, organization_id, project_id, name, is_system_default)
+    VALUES (?, ?, ?, 'default', 1) ON CONFLICT (organization_id, project_id, name) DO NOTHING`)
+    .bind(randomId("ste"), organizationId, project.id).run();
+  return {
+    id: project.id,
+    organizationId: project.organization_id,
+    repositoryOwner: input.repositoryOwner,
+    repositoryName: input.repositoryName,
+    created,
+  };
+}
 
 export async function listProjects(env: Env, session: Session): Promise<Response> {
   requirePermission(session, "runs:view");
@@ -40,51 +104,4 @@ export async function getProject(env: Env, session: Session, projectId: string):
   `).bind(session.organizationId, projectId).first();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");
   return json({ project });
-}
-
-export async function createProject(
-  request: Request,
-  env: Env,
-  session: Session,
-  context: RequestContext,
-): Promise<Response> {
-  requirePermission(session, "projects:admin");
-  const body = await readJson<CreateProjectBody>(request);
-  const name = requiredString(body.name, "name", 100);
-  const slug = requiredString(body.slug, "slug", 63).toLowerCase();
-  const repositoryOwner = requiredString(body.repositoryOwner, "repositoryOwner", 100);
-  const repositoryName = requiredString(body.repositoryName, "repositoryName", 100);
-  const defaultBranch = requiredString(body.defaultBranch, "defaultBranch", 255);
-  if (!SLUG.test(slug)) throw new HttpError(400, "invalid_slug", "Slug must contain lowercase letters, digits, and internal hyphens");
-  if (!REPOSITORY_PART.test(repositoryOwner) || !REPOSITORY_PART.test(repositoryName)) {
-    throw new HttpError(400, "invalid_repository", "Repository owner and name contain invalid characters");
-  }
-  const projectId = randomId("prj");
-  const suiteId = randomId("ste");
-  const auditId = randomId("aud");
-  try {
-    await env.DB.batch([
-      env.DB.prepare(`INSERT INTO projects
-        (id, organization_id, name, slug, repository_owner, repository_name, default_branch)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .bind(projectId, session.organizationId, name, slug, repositoryOwner, repositoryName, defaultBranch),
-      env.DB.prepare("INSERT INTO suites (id, organization_id, project_id, name, is_system_default) VALUES (?, ?, ?, 'default', 1)")
-        .bind(suiteId, session.organizationId, projectId),
-      env.DB.prepare(`INSERT INTO audit_events
-        (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
-        VALUES (?, ?, ?, 'project.created', 'project', ?, ?, ?)`)
-        .bind(auditId, session.organizationId, session.userId, projectId, context.requestId, JSON.stringify({ slug, repository: `${repositoryOwner}/${repositoryName}` })),
-    ]);
-  } catch (error) {
-    if (String(error).includes("UNIQUE")) throw new HttpError(409, "project_conflict", "A project with that slug or repository already exists");
-    throw error;
-  }
-  return json({ project: { id: projectId, name, slug, repositoryOwner, repositoryName, defaultBranch } }, { status: 201 });
-}
-
-function requiredString(value: unknown, field: string, maxLength: number): string {
-  if (typeof value !== "string" || value.trim().length === 0 || value.length > maxLength) {
-    throw new HttpError(400, "invalid_request", `${field} must be a non-empty string no longer than ${maxLength} characters`);
-  }
-  return value.trim();
 }

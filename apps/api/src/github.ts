@@ -139,7 +139,7 @@ async function appJwt(env: Env): Promise<string> {
   return `${header}.${payload}.${base64Url(new Uint8Array(signature))}`;
 }
 
-async function githubRequest<T>(env: Env, path: string, init: RequestInit = {}, installationId?: number): Promise<T> {
+export async function githubRequest<T>(env: Env, path: string, init: RequestInit = {}, installationId?: number): Promise<T> {
   let bearer = await appJwt(env);
   if (installationId !== undefined) {
     const response = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
@@ -188,12 +188,6 @@ async function exchangeGitHubUserToken(env: Env, code: string): Promise<string> 
   const tokenPayload = await tokenResponse.json() as { access_token?: string };
   if (!tokenPayload.access_token) throw new HttpError(401, "github_oauth_failed", "GitHub authorization did not grant installation access");
   return tokenPayload.access_token;
-}
-
-export function githubProjectSlug(repositoryName: string, repositoryId: number): string {
-  const suffix = Math.max(0, repositoryId).toString(36);
-  const base = repositoryName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "repository";
-  return `${base.slice(0, Math.max(1, 62 - suffix.length)).replace(/-+$/g, "")}-${suffix}`;
 }
 
 export async function beginGitHubOnboarding(env: Env, session: Session): Promise<Response> {
@@ -279,18 +273,6 @@ export async function completeGitHubOnboarding(
   const repositories = installedRepositories.filter((repository) => administeredRepositories.has(repositoryKey(repository)));
   if (repositories.length === 0) throw new HttpError(403, "repository_administration_required", "Select at least one repository that you administer");
 
-  const existing = await env.DB.prepare(`
-    SELECT id, name, slug, repository_owner, repository_name, github_repository_id
-      FROM projects WHERE organization_id = ?
-  `).bind(session.organizationId).all<{
-    id: string; name: string; slug: string; repository_owner: string; repository_name: string; github_repository_id: number | null;
-  }>();
-  const byRepositoryId = new Map((existing.results ?? []).filter((project) => project.github_repository_id !== null)
-    .map((project) => [project.github_repository_id, project]));
-  const unidentifiedByRepository = new Map((existing.results ?? []).filter((project) => project.github_repository_id === null).map((project) => [
-    `${project.repository_owner.toLowerCase()}/${project.repository_name.toLowerCase()}`, project,
-  ]));
-  const usedSlugs = new Set((existing.results ?? []).map((project) => project.slug));
   const existingMappings = await env.DB.prepare(`
     SELECT repository_owner, repository_name FROM github_installations
      WHERE organization_id = ? AND installation_id = ?
@@ -307,54 +289,18 @@ export async function completeGitHubOnboarding(
        WHERE organization_id = ? AND installation_id = ? AND repository_owner = ? AND repository_name = ?
     `).bind(session.organizationId, Number(installationId), mapping.repository_owner, mapping.repository_name));
   }
-  const claimedProjectIds = new Set<string>();
-  const plans = repositories.map((repository) => {
-    const prior = byRepositoryId.get(repository.id) ?? unidentifiedByRepository.get(repositoryKey(repository));
-    if (prior && claimedProjectIds.has(prior.id)) {
-      throw new HttpError(409, "github_identity_conflict", "GitHub returned conflicting repository identities");
-    }
-    if (prior) claimedProjectIds.add(prior.id);
-    return { repository, prior, projectId: prior?.id ?? randomId("prj") };
-  });
-  for (const { repository, prior, projectId } of plans) {
-    if (prior) {
-      statements.push(env.DB.prepare(`
-        UPDATE projects SET repository_owner = ?, repository_name = ?, deleted_at = NULL,
-          github_repository_id = ?, default_branch = ?, updated_at = unixepoch()
-         WHERE id = ? AND organization_id = ?
-      `).bind(repository.owner.login, repository.name, repository.id, repository.default_branch, projectId, session.organizationId));
-    }
-  }
-  for (const { repository, prior, projectId } of plans) {
-    if (!prior) {
-      let slug = githubProjectSlug(repository.name, repository.id);
-      if (usedSlugs.has(slug)) slug = `repository-${projectId.slice(-12)}`;
-      usedSlugs.add(slug);
-      statements.push(
-        env.DB.prepare(`INSERT INTO projects
-          (id, organization_id, name, slug, repository_owner, repository_name, github_repository_id, default_branch)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-          .bind(projectId, session.organizationId, repository.name, slug, repository.owner.login, repository.name, repository.id, repository.default_branch),
-        env.DB.prepare("INSERT INTO suites (id, organization_id, project_id, name, is_system_default) VALUES (?, ?, ?, 'default', 1)")
-          .bind(randomId("ste"), session.organizationId, projectId),
-      );
-    }
-  }
-  const projects: Array<{ id: string; name: string; repositoryOwner: string; repositoryName: string; defaultBranch: string; created: boolean }> = [];
-  for (const { repository, prior, projectId } of plans) {
+  for (const repository of repositories) {
     statements.push(env.DB.prepare(`
       INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)
       DO UPDATE SET account_login = excluded.account_login, suspended_at = NULL, updated_at = unixepoch()
     `).bind(randomId("ghi"), session.organizationId, Number(installationId), repository.owner.login, repository.owner.login, repository.name));
-    projects.push({ id: projectId, name: prior?.name ?? repository.name, repositoryOwner: repository.owner.login,
-      repositoryName: repository.name, defaultBranch: repository.default_branch, created: !prior });
   }
   statements.push(env.DB.prepare(`
     INSERT INTO audit_events (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
     VALUES (?, ?, ?, 'github.installation_synced', 'github_installation', ?, ?, ?)
   `).bind(randomId("aud"), session.organizationId, session.userId, String(installationId), context.requestId,
-    JSON.stringify({ repositoryCount: repositories.length, createdProjectCount: projects.filter((project) => project.created).length })));
+    JSON.stringify({ repositoryCount: repositories.length })));
   try { await env.DB.batch(statements); }
   catch (error) {
     if (String(error).includes("github_installation_already_linked")) {
@@ -363,7 +309,7 @@ export async function completeGitHubOnboarding(
     if (String(error).includes("UNIQUE")) throw new HttpError(409, "github_sync_conflict", "One of these repositories is already connected elsewhere");
     throw error;
   }
-  return json({ installationId: Number(installationId), projects });
+  return json({ installationId: Number(installationId), repositoryCount: repositories.length });
 }
 
 function repositoryKey(repository: Pick<GitHubRepository, "owner" | "name">): string {

@@ -26,5 +26,5 @@ Unpinned run metadata is removed after one year. Temporary uploads continue to u
 
 - Treat history reset as an exceptional recovery operation and verify the refreshed default head first.
 - Keep at least one active administrator; the API rejects suspension or demotion of the final active admin.
-- Rotate project tokens periodically and immediately after suspected exposure. Rotation atomically revokes the predecessor.
+- Rotate workspace upload keys periodically and immediately after suspected exposure. Rotation atomically revokes the predecessor.
 - Do not reduce retention without communicating that the next cleanup pass may expire newly eligible artifacts.

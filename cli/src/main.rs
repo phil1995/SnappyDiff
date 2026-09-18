@@ -36,14 +36,15 @@ struct Cli {
 enum Command {
     Login,
     Upload(Box<UploadArgs>),
-    Status { run_id: String },
 }
 
 #[derive(Args)]
 struct UploadArgs {
     directory: PathBuf,
-    #[arg(long, env = "SNAPPYDIFF_PROJECT")]
-    project: Option<String>,
+    #[arg(long, env = "SNAPPYDIFF_REPOSITORY")]
+    repository: Option<String>,
+    #[arg(long, env = "SNAPPYDIFF_DEFAULT_BRANCH")]
+    default_branch: Option<String>,
     #[arg(long, env = "GITHUB_RUN_ID")]
     provider_run_id: Option<String>,
     #[arg(long, env = "GITHUB_RUN_ATTEMPT", default_value_t = 1)]
@@ -82,14 +83,19 @@ struct UploadArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileConfig {
     endpoint: Option<String>,
-    project: Option<String>,
+    repository: Option<String>,
+    default_branch: Option<String>,
     upload_concurrency: Option<usize>,
     oidc_audience: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OidcExchange { token: String, trust_class: String, run_constraints: OidcRunConstraints }
+struct OidcExchange { token: String, project_id: String, trust_class: String, run_constraints: OidcRunConstraints }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceExchange { token: String, project_id: String }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,13 +196,16 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Upload(args) => {
             let mut args = *args;
-            args.project = args.project.or(file_config.project);
+            args.repository = args.repository.or(file_config.repository);
+            args.default_branch = args.default_branch.or(file_config.default_branch);
             args.concurrency = args.concurrency.or(file_config.upload_concurrency);
-            let project = args.project.as_deref().context("project is required via --project, SNAPPYDIFF_PROJECT, or .snappydiff.json")?;
-            let token = if let Some(token) = cli.token {
-                token
+            let (token, project) = if let Some(token) = cli.token {
+                let repository = discover_repository(&args.directory, args.repository.as_deref())?;
+                let default_branch = args.default_branch.as_deref().unwrap_or("main");
+                let exchange = workspace_token(&client, &endpoint, &token, &repository, default_branch).await?;
+                (exchange.token, exchange.project_id)
             } else {
-                let exchange = github_oidc_token(&client, &endpoint, project, args.pull_request, file_config.oidc_audience.as_deref()).await?;
+                let exchange = github_oidc_token(&client, &endpoint, args.pull_request, file_config.oidc_audience.as_deref()).await?;
                 args.fork = exchange.trust_class == "fork_isolated";
                 args.provider_run_id = Some(exchange.run_constraints.provider_run_id);
                 args.attempt = exchange.run_constraints.attempt_number;
@@ -204,17 +213,11 @@ async fn run(cli: Cli) -> Result<()> {
                 args.branch = exchange.run_constraints.branch;
                 args.pull_request = exchange.run_constraints.pull_request_number;
                 args.pull_request_head = exchange.run_constraints.pull_request_head_sha;
-                exchange.token
+                (exchange.token, exchange.project_id)
             };
             if !token.starts_with("sd_") { bail!("machine credential has an invalid format"); }
             let api = Api { client, endpoint: endpoint.trim_end_matches('/').to_owned(), token };
-            upload(&api, args, cli.json).await
-        }
-        Command::Status { run_id } => {
-            let token = cli.token.context("SNAPPYDIFF_TOKEN or --token is required for status")?;
-            let api = Api { client, endpoint: endpoint.trim_end_matches('/').to_owned(), token };
-            let status: StatusResponse = api.get(&format!("/api/v1/runs/{run_id}")).await?;
-            print_value(cli.json, &status)
+            upload(&api, args, &project, cli.json).await
         }
         Command::Login => unreachable!(),
     }
@@ -223,7 +226,6 @@ async fn run(cli: Cli) -> Result<()> {
 async fn github_oidc_token(
     client: &Client,
     endpoint: &str,
-    project: &str,
     pull_request: Option<u64>,
     configured_audience: Option<&str>,
 ) -> Result<OidcExchange> {
@@ -235,7 +237,7 @@ async fn github_oidc_token(
     let oidc = response.json::<serde_json::Value>().await?.get("value").and_then(|value| value.as_str()).context("GitHub OIDC response omitted token")?.to_owned();
     let response = client.post(format!("{}/api/v1/auth/github-oidc/exchange", endpoint.trim_end_matches('/')))
         .bearer_auth(oidc)
-        .json(&serde_json::json!({ "projectId": project, "pullRequestNumber": pull_request }))
+        .json(&serde_json::json!({ "pullRequestNumber": pull_request }))
         .send().await?;
     let status = response.status();
     let bytes = response.bytes().await?;
@@ -243,10 +245,57 @@ async fn github_oidc_token(
     serde_json::from_slice(&bytes).context("SnappyDiff returned an invalid OIDC exchange response")
 }
 
-async fn upload(api: &Api, args: UploadArgs, json_output: bool) -> Result<()> {
+async fn workspace_token(
+    client: &Client,
+    endpoint: &str,
+    token: &str,
+    repository: &str,
+    default_branch: &str,
+) -> Result<WorkspaceExchange> {
+    let (repository_owner, repository_name) = repository.split_once('/')
+        .context("repository must use owner/name format")?;
+    let response = client.post(format!("{}/api/v1/auth/workspace/exchange", endpoint.trim_end_matches('/')))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "repositoryOwner": repository_owner,
+            "repositoryName": repository_name,
+            "defaultBranch": default_branch,
+        }))
+        .send().await?;
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    if !status.is_success() { bail!("SnappyDiff workspace exchange failed with {status}: {}", String::from_utf8_lossy(&bytes)); }
+    serde_json::from_slice(&bytes).context("SnappyDiff returned an invalid workspace exchange response")
+}
+
+fn discover_repository(directory: &Path, configured: Option<&str>) -> Result<String> {
+    if let Some(repository) = configured { return normalize_repository(repository); }
+    if let Ok(repository) = std::env::var("GITHUB_REPOSITORY") { return normalize_repository(&repository); }
+    let remote = git_value(directory, &["remote", "get-url", "origin"])
+        .context("repository could not be detected; set SNAPPYDIFF_REPOSITORY or repository in .snappydiff.json")?;
+    let path = remote.strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .unwrap_or(&remote);
+    normalize_repository(path.trim_end_matches(".git"))
+}
+
+fn normalize_repository(value: &str) -> Result<String> {
+    let trimmed = value.trim().trim_matches('/');
+    let mut parts = trimmed.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    if owner.is_empty() || name.is_empty() || parts.next().is_some()
+        || !owner.chars().all(|value| value.is_ascii_alphanumeric() || "_.-".contains(value))
+        || !name.chars().all(|value| value.is_ascii_alphanumeric() || "_.-".contains(value)) {
+        bail!("repository must use owner/name format");
+    }
+    Ok(format!("{owner}/{name}"))
+}
+
+async fn upload(api: &Api, args: UploadArgs, project: &str, json_output: bool) -> Result<()> {
     let concurrency = args.concurrency.unwrap_or(4);
     if concurrency == 0 || concurrency > 32 { bail!("concurrency must be between 1 and 32"); }
-    let project = args.project.context("project is required via --project, SNAPPYDIFF_PROJECT, or .snappydiff.json")?;
     let entries = scan(&args.directory).await?;
     if entries.is_empty() && !args.allow_empty { bail!("no PNG screenshots found; pass --allow-empty only for an intentional full removal"); }
     let provider_run_id = args.provider_run_id.unwrap_or_else(|| format!("manual-{}", epoch_millis()));
@@ -524,5 +573,12 @@ mod tests {
         bytes.extend_from_slice(&20_000_u32.to_be_bytes());
         bytes.extend_from_slice(&1_u32.to_be_bytes());
         assert!(png_dimensions(&bytes).is_err());
+    }
+
+    #[test]
+    fn normalizes_repository_identity() {
+        assert_eq!(normalize_repository("pointfreeco/swift-snapshot-testing").unwrap(), "pointfreeco/swift-snapshot-testing");
+        assert!(normalize_repository("pointfreeco/swift-snapshot-testing/extra").is_err());
+        assert!(normalize_repository("missing-owner").is_err());
     }
 }
