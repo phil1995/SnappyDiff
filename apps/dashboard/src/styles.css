@@ -23,11 +23,31 @@ h2 { font-size: 22px; letter-spacing: -.035em; margin: 0; } p { line-height: 1.5
 .button:hover { border-color: #454d57; background: #1c2128; } .button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .button.danger { color: #ffaaa6; } .button:disabled { opacity: .5; cursor: default; }
 .section-head { display: flex; align-items: end; justify-content: space-between; margin: 34px 0 16px; gap: 20px; }
+.section-actions { display: flex; align-items: center; gap: 12px; }
 .title-row { display: flex; align-items: end; justify-content: space-between; gap: 20px; } .title-row h1 { margin-bottom: 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(285px, 1fr)); gap: 14px; }
 .card { border: 1px solid var(--line); border-radius: 13px; background: linear-gradient(145deg, #14181d, #0f1216); padding: 19px; text-decoration: none; transition: transform .16s, border-color .16s; }
 a.card:hover { transform: translateY(-2px); border-color: #4a525d; } .repo { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 8px; }
 .empty { border: 1px dashed #343a43; border-radius: 14px; padding: 42px 24px; color: var(--muted); text-align: center; }
+.onboarding-empty { padding: 56px 24px; background: linear-gradient(145deg, #151a1e, #0d1013); }
+.onboarding-empty h2 { color: #f3f4ef; margin-top: 10px; }
+.onboarding-empty p { max-width: 580px; margin: 12px auto 22px; }
+.onboarding { display: grid; grid-template-columns: minmax(0, .85fr) minmax(360px, 1fr); gap: clamp(28px, 6vw, 90px); align-items: start; padding-top: 26px; }
+.onboarding-copy { padding-top: 22px; }
+.onboarding-copy h1 { font-size: clamp(38px, 5vw, 60px); }
+.onboarding-copy > p { color: var(--muted); font-size: 17px; max-width: 500px; }
+.setup-steps { list-style: none; padding: 0; margin: 34px 0 0; display: grid; gap: 18px; }
+.setup-steps li { display: flex; gap: 13px; align-items: start; }
+.setup-steps li > span { flex: 0 0 28px; height: 28px; display: grid; place-items: center; border: 1px solid #3b424b; border-radius: 50%; color: var(--accent); font-size: 12px; font-weight: 750; }
+.setup-steps strong, .setup-steps small { display: block; } .setup-steps small { color: var(--muted); margin-top: 4px; line-height: 1.4; }
+.project-form { border: 1px solid var(--line); border-radius: 16px; padding: clamp(22px, 4vw, 34px); background: linear-gradient(145deg, #171b20, #101318); box-shadow: 0 24px 80px #0005; }
+.project-form h2 { margin-bottom: 22px; }
+.project-form label { margin: 18px 0; color: #d7dbe0; font-size: 13px; font-weight: 650; }
+.project-form label small { color: var(--muted); font-weight: 400; line-height: 1.4; }
+.project-form input { min-height: 44px; font-size: 14px; }
+.project-form input:focus { outline: 2px solid #d9ff5744; border-color: var(--accent); }
+.form-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 24px; }
+.form-error { border: 1px solid #733632; background: #3d1c1a66; color: #ffaaa6; border-radius: 9px; padding: 11px 12px; font-size: 13px; line-height: 1.4; }
 .crumbs { display: flex; gap: 8px; color: var(--muted); font-size: 13px; margin-bottom: 22px; } .crumbs a { text-decoration: none; } .crumbs a:hover { color: #fff; }
 .run-list { border: 1px solid var(--line); border-radius: 13px; overflow: hidden; background: #0e1115; }
 .run-row { display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(120px, .7fr) 110px 180px; align-items: center; gap: 18px; padding: 15px 18px; border-bottom: 1px solid #22272e; text-decoration: none; }
@@ -65,5 +85,6 @@ a.card:hover { transform: translateY(-2px); border-color: #4a525d; } .repo { col
   .run-row { grid-template-columns: 1fr auto; } .run-row > :nth-child(2), .run-row > :nth-child(4) { display: none; }
   .stats { grid-template-columns: repeat(2, 1fr); } .review-layout { grid-template-columns: 1fr; }
   .settings-grid { grid-template-columns: 1fr; } .settings-card.wide { grid-column: auto; } .history-row { grid-template-columns: 90px 1fr; } .history-row > :nth-child(n+3) { display: none; }
+  .onboarding { grid-template-columns: 1fr; } .onboarding-copy { padding-top: 0; } .setup-steps { margin: 24px 0 8px; }
   .review-sidebar { position: static; height: auto; max-height: 210px; border-right: 0; border-bottom: 1px solid var(--line); } .review-main { padding: 14px; } .viewport { min-height: 420px; }
 }

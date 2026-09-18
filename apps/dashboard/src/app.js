@@ -1,3 +1,5 @@
+import { parseGitHubRepository, projectSlug } from "./project-form.js";
+
 const root = document.querySelector("#app");
 const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, swipe: .5, blinkTimer: null, worker: null, viewerGeneration: 0, routeGeneration: 0, comparisonId: null };
 
@@ -34,6 +36,7 @@ async function route() {
     if (routeGeneration !== state.routeGeneration) return;
     const path = location.pathname;
     if (path === "/github/callback") return await completeGitHubLink(routeGeneration);
+    if (path === "/projects/new") return renderNewProject();
     const project = path.match(/^\/projects\/([^/]+)$/);
     const projectSettings = path.match(/^\/projects\/([^/]+)\/settings$/);
     const run = path.match(/^\/runs\/([^/]+)$/);
@@ -76,8 +79,53 @@ function renderLogin() {
 async function renderHome(routeGeneration) {
   const { projects } = await api("/api/v1/projects");
   if (routeGeneration !== state.routeGeneration) return;
+  const admin = state.me.user.role === "admin";
   const cards = projects.map((project) => `<a class="card" href="/projects/${encodeURIComponent(project.id)}" data-link><h2>${escapeHtml(project.name)}</h2><div class="repo">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</div><p class="muted">Default branch · ${escapeHtml(project.defaultBranch)}</p></a>`).join("");
-  root.innerHTML = header(`<section class="hero"><span class="eyebrow">Workspace</span><h1>Your visual changes,<br>in one sharp view.</h1><p>Open a project to inspect recent runs, compare pixels, and resolve snapshot changes.</p></section><div class="section-head"><h2>Projects</h2><span class="muted">${projects.length} total</span></div>${cards ? `<div class="grid">${cards}</div>` : `<div class="empty">No projects yet. Create one through the API to begin uploading snapshots.</div>`}`);
+  const empty = admin
+    ? `<section class="empty onboarding-empty"><span class="eyebrow">First project</span><h2>Connect a GitHub repository</h2><p>Tell SnappyDiff where your snapshots live. You can connect the GitHub App and CI after the project is created.</p><a class="button primary" href="/projects/new" data-link>Create your first project</a></section>`
+    : `<div class="empty">No projects are available yet. Ask a workspace administrator to create one.</div>`;
+  root.innerHTML = header(`<section class="hero"><span class="eyebrow">Workspace</span><h1>Your visual changes,<br>in one sharp view.</h1><p>Open a project to inspect recent runs, compare pixels, and resolve snapshot changes.</p></section><div class="section-head"><h2>Projects</h2><div class="section-actions"><span class="muted">${projects.length} total</span>${admin && projects.length ? `<a class="button primary" href="/projects/new" data-link>New project</a>` : ""}</div></div>${cards ? `<div class="grid">${cards}</div>` : empty}`);
+}
+
+function renderNewProject() {
+  if (state.me.user.role !== "admin") throw new Error("Only workspace administrators can create projects.");
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>New project</span></nav><section class="onboarding"><div class="onboarding-copy"><span class="eyebrow">New project</span><h1>Connect your snapshots.</h1><p>A project maps one GitHub repository to its snapshot history, baselines, and pull request checks.</p><ol class="setup-steps"><li><span>1</span><div><strong>Create the project</strong><small>Choose the repository and default branch.</small></div></li><li><span>2</span><div><strong>Connect GitHub</strong><small>Install the SnappyDiff App for this repository.</small></div></li><li><span>3</span><div><strong>Upload from CI</strong><small>Run your existing snapshot tests and upload their output.</small></div></li></ol></div><form class="project-form" data-project-create><h2>Project details</h2><label>Project name<input name="name" maxlength="100" required autofocus placeholder="My iOS App"><small>Shown to everyone in this workspace.</small></label><label>GitHub repository<input name="repository" required autocomplete="off" spellcheck="false" placeholder="owner/repository"><small>Paste owner/repository, a GitHub URL, or an SSH clone URL.</small></label><label>Default branch<input name="defaultBranch" maxlength="255" required value="main" spellcheck="false"><small>Usually main or master.</small></label><div class="form-error" data-project-error role="alert" hidden></div><div class="form-actions"><a class="button" href="/" data-link>Cancel</a><button class="button primary" type="submit">Create project</button></div></form></section>`);
+  const form = root.querySelector("[data-project-create]");
+  const nameInput = form.elements.name;
+  const repositoryInput = form.elements.repository;
+  repositoryInput.addEventListener("change", () => {
+    if (nameInput.value.trim()) return;
+    try { nameInput.value = parseGitHubRepository(repositoryInput.value).repositoryName; }
+    catch { /* Submission shows the actionable validation message. */ }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.submitter;
+    const error = form.querySelector("[data-project-error]");
+    error.hidden = true;
+    button.disabled = true;
+    button.textContent = "Creating…";
+    try {
+      const values = new FormData(form);
+      const name = String(values.get("name") ?? "").trim();
+      const repository = parseGitHubRepository(values.get("repository"));
+      const result = await api("/api/v1/projects", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          slug: projectSlug(name, repository.repositoryName),
+          ...repository,
+          defaultBranch: String(values.get("defaultBranch") ?? "").trim(),
+        }),
+      });
+      navigate(`/projects/${encodeURIComponent(result.project.id)}/settings`, true);
+    } catch (failure) {
+      error.textContent = failure.message;
+      error.hidden = false;
+      button.disabled = false;
+      button.textContent = "Create project";
+    }
+  });
 }
 
 async function renderProject(projectId, routeGeneration) {
