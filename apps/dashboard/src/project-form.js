@@ -37,7 +37,7 @@ export function projectSlug(value, fallback = "project") {
 
 export function projectSetupPath(projectId, requestGeneration, currentGeneration) {
   if (requestGeneration !== currentGeneration) return null;
-  return `/projects/${encodeURIComponent(projectId)}/setup`;
+  return `/projects/${encodeURIComponent(projectId)}/settings`;
 }
 
 export function setProjectFormError(form, message = null) {

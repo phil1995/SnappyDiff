@@ -13,12 +13,32 @@ CREATE TABLE github_installation_owners (
 ) STRICT;
 
 INSERT INTO github_installation_owners (installation_id, organization_id, account_login)
-SELECT installation_id, MIN(organization_id), MIN(account_login)
-  FROM github_installations
- GROUP BY installation_id;
+SELECT installation_id, organization_id, MIN(account_login)
+  FROM github_installations candidate
+ WHERE organization_id = (
+   SELECT MIN(owner_candidate.organization_id) FROM github_installations owner_candidate
+    WHERE owner_candidate.installation_id = candidate.installation_id
+ )
+ GROUP BY installation_id, organization_id;
 
-UPDATE github_installations
-   SET suspended_at = COALESCE(suspended_at, unixepoch()), updated_at = unixepoch()
+CREATE TABLE github_installation_migration_conflicts (
+  installation_id INTEGER NOT NULL,
+  displaced_organization_id TEXT NOT NULL,
+  selected_organization_id TEXT NOT NULL,
+  repository_owner TEXT,
+  repository_name TEXT,
+  recorded_at INTEGER NOT NULL DEFAULT (unixepoch())
+) STRICT;
+
+INSERT INTO github_installation_migration_conflicts
+  (installation_id, displaced_organization_id, selected_organization_id, repository_owner, repository_name)
+SELECT mapping.installation_id, mapping.organization_id, owner.organization_id,
+       mapping.repository_owner, mapping.repository_name
+  FROM github_installations mapping
+  JOIN github_installation_owners owner ON owner.installation_id = mapping.installation_id
+ WHERE mapping.organization_id != owner.organization_id;
+
+DELETE FROM github_installations
  WHERE organization_id != (
    SELECT owner.organization_id FROM github_installation_owners owner
     WHERE owner.installation_id = github_installations.installation_id

@@ -287,7 +287,7 @@ export async function completeGitHubOnboarding(
   }>();
   const byRepositoryId = new Map((existing.results ?? []).filter((project) => project.github_repository_id !== null)
     .map((project) => [project.github_repository_id, project]));
-  const byRepository = new Map((existing.results ?? []).map((project) => [
+  const unidentifiedByRepository = new Map((existing.results ?? []).filter((project) => project.github_repository_id === null).map((project) => [
     `${project.repository_owner.toLowerCase()}/${project.repository_name.toLowerCase()}`, project,
   ]));
   const usedSlugs = new Set((existing.results ?? []).map((project) => project.slug));
@@ -307,17 +307,26 @@ export async function completeGitHubOnboarding(
        WHERE organization_id = ? AND installation_id = ? AND repository_owner = ? AND repository_name = ?
     `).bind(session.organizationId, Number(installationId), mapping.repository_owner, mapping.repository_name));
   }
-  const projects: Array<{ id: string; name: string; repositoryOwner: string; repositoryName: string; defaultBranch: string; created: boolean }> = [];
-  for (const repository of repositories) {
-    const prior = byRepositoryId.get(repository.id) ?? byRepository.get(repositoryKey(repository));
-    const projectId = prior?.id ?? randomId("prj");
+  const claimedProjectIds = new Set<string>();
+  const plans = repositories.map((repository) => {
+    const prior = byRepositoryId.get(repository.id) ?? unidentifiedByRepository.get(repositoryKey(repository));
+    if (prior && claimedProjectIds.has(prior.id)) {
+      throw new HttpError(409, "github_identity_conflict", "GitHub returned conflicting repository identities");
+    }
+    if (prior) claimedProjectIds.add(prior.id);
+    return { repository, prior, projectId: prior?.id ?? randomId("prj") };
+  });
+  for (const { repository, prior, projectId } of plans) {
     if (prior) {
       statements.push(env.DB.prepare(`
         UPDATE projects SET repository_owner = ?, repository_name = ?, deleted_at = NULL,
           github_repository_id = ?, default_branch = ?, updated_at = unixepoch()
          WHERE id = ? AND organization_id = ?
       `).bind(repository.owner.login, repository.name, repository.id, repository.default_branch, projectId, session.organizationId));
-    } else {
+    }
+  }
+  for (const { repository, prior, projectId } of plans) {
+    if (!prior) {
       let slug = githubProjectSlug(repository.name, repository.id);
       if (usedSlugs.has(slug)) slug = `repository-${projectId.slice(-12)}`;
       usedSlugs.add(slug);
@@ -330,6 +339,9 @@ export async function completeGitHubOnboarding(
           .bind(randomId("ste"), session.organizationId, projectId),
       );
     }
+  }
+  const projects: Array<{ id: string; name: string; repositoryOwner: string; repositoryName: string; defaultBranch: string; created: boolean }> = [];
+  for (const { repository, prior, projectId } of plans) {
     statements.push(env.DB.prepare(`
       INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)

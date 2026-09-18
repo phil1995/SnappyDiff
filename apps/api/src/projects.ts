@@ -30,7 +30,12 @@ export async function getProject(env: Env, session: Session, projectId: string):
   const project = await env.DB.prepare(`
     SELECT id, name, slug, repository_owner AS repositoryOwner, repository_name AS repositoryName,
       default_branch AS defaultBranch, retention_days AS retentionDays,
-      promoted_retention_days AS promotedRetentionDays, created_at AS createdAt, updated_at AS updatedAt
+      promoted_retention_days AS promotedRetentionDays, created_at AS createdAt, updated_at AS updatedAt,
+      EXISTS(SELECT 1 FROM github_installations installation
+        WHERE installation.organization_id = projects.organization_id
+          AND installation.repository_owner = projects.repository_owner
+          AND installation.repository_name = projects.repository_name
+          AND installation.suspended_at IS NULL) AS githubConnected
       FROM projects WHERE organization_id = ? AND id = ? AND deleted_at IS NULL
   `).bind(session.organizationId, projectId).first();
   if (!project) throw new HttpError(404, "project_not_found", "Project was not found");

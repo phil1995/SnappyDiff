@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import type { Session } from "./auth.ts";
 import { beginGitHubOnboarding, completeGitHubOnboarding, githubProjectSlug, verifyGitHubWebhook } from "./github.ts";
@@ -75,10 +77,12 @@ function githubFetchFixture(): typeof fetch {
     const url = String(input instanceof Request ? input.url : input);
     if (url === "https://github.com/login/oauth/access_token") return Response.json({ access_token: "user-token" });
     if (url.includes("/user/installations/77/repositories")) return Response.json({ repositories: [
+      { id: 303, name: "original", owner: { login: "owner" }, default_branch: "main", permissions: { admin: true } },
       { id: 101, name: "renamed", owner: { login: "owner" }, default_branch: "main", permissions: { admin: true } },
     ] });
     if (url.includes("/app/installations/77/access_tokens")) return Response.json({ token: "installation-token" });
     if (url.includes("/installation/repositories")) return Response.json({ repositories: [
+      { id: 303, name: "original", owner: { login: "owner" }, default_branch: "main" },
       { id: 101, name: "renamed", owner: { login: "owner" }, default_branch: "main" },
       { id: 202, name: "shared", owner: { login: "owner" }, default_branch: "main" },
     ] });
@@ -130,13 +134,17 @@ describe("GitHub-first onboarding", () => {
         method: "POST", body: JSON.stringify({ state, installationId: 77, code: "oauth-code" }),
       }), environment, admin, { requestId: "req_sync", startedAt: 0 });
       const payload = await response.json() as { projects: Array<{ id: string }> };
-      assert.equal(payload.projects[0]?.id, "prj_renamed");
+      assert.equal(payload.projects.find((project) => project.id === "prj_renamed")?.id, "prj_renamed");
+      assert.equal(payload.projects.some((project) => project.id !== "prj_renamed"), true);
       const rename = database.batchStatements.find((statement) => statement.query.includes("UPDATE projects SET repository_owner"));
       assert.deepEqual(rename?.values.slice(0, 6), ["owner", "renamed", 101, "main", "prj_renamed", "org_1"]);
       const sharedMapping = database.batchStatements.find((statement) => statement.values.at(-1) === "shared"
         && statement.query.includes("UPDATE github_installations"));
       assert.match(sharedMapping?.query ?? "", /suspended_at = NULL/);
       assert.ok(database.batchStatements[0]?.query.includes("github_installation_owners"));
+      const firstProjectWrite = database.batchStatements.findIndex((statement) => statement.query.includes("UPDATE projects SET"));
+      const firstProjectInsert = database.batchStatements.findIndex((statement) => statement.query.includes("INSERT INTO projects"));
+      assert.ok(firstProjectWrite >= 0 && firstProjectWrite < firstProjectInsert, "renames must happen before reused names are inserted");
     } finally { globalThis.fetch = originalFetch; }
   });
 
@@ -155,5 +163,43 @@ describe("GitHub-first onboarding", () => {
         return typeof error === "object" && error !== null && "code" in error && error.code === "installation_already_linked";
       });
     } finally { globalThis.fetch = originalFetch; }
+  });
+});
+
+describe("GitHub identity migration", () => {
+  it("records and removes displaced mappings before enforcing one installation owner", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE organizations (id TEXT PRIMARY KEY) STRICT;
+      CREATE TABLE projects (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL) STRICT;
+      CREATE TABLE github_installations (
+        id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, installation_id INTEGER NOT NULL,
+        account_login TEXT NOT NULL, repository_owner TEXT, repository_name TEXT,
+        suspended_at INTEGER, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      ) STRICT;
+      CREATE UNIQUE INDEX github_repository_installation_owner
+        ON github_installations(installation_id, repository_owner, repository_name)
+        WHERE repository_owner IS NOT NULL AND repository_name IS NOT NULL;
+      INSERT INTO organizations VALUES ('org_a'), ('org_b');
+      INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
+        VALUES ('ghi_a', 'org_a', 77, 'owner', 'owner', 'one'),
+               ('ghi_b', 'org_b', 77, 'owner', 'owner', 'two');
+    `);
+    database.exec(readFileSync(new URL("../migrations/0012_github_repository_identity.sql", import.meta.url), "utf8"));
+    const owner = database.prepare("SELECT installation_id, organization_id FROM github_installation_owners").get();
+    assert.equal(owner?.installation_id, 77);
+    assert.equal(owner?.organization_id, "org_a");
+    const conflict = database.prepare("SELECT displaced_organization_id, selected_organization_id FROM github_installation_migration_conflicts").get();
+    assert.equal(conflict?.displaced_organization_id, "org_b");
+    assert.equal(conflict?.selected_organization_id, "org_a");
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM github_installations WHERE organization_id = 'org_b'").get()?.count, 0);
+    assert.doesNotThrow(() => database.exec(`
+      INSERT INTO github_installations (id, organization_id, installation_id, account_login, repository_owner, repository_name)
+      VALUES ('ghi_reclaimed', 'org_a', 77, 'owner', 'owner', 'two');
+    `));
+    assert.throws(() => database.exec("UPDATE github_installation_owners SET organization_id = 'org_b' WHERE installation_id = 77"),
+      /github_installation_already_linked/);
+    database.close();
   });
 });

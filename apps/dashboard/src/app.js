@@ -157,6 +157,10 @@ function renderNewProject(routeGeneration) {
 async function renderProjectSetup(projectId, routeGeneration) {
   const { project } = await api(`/api/v1/projects/${encodeURIComponent(projectId)}`);
   if (routeGeneration !== state.routeGeneration) return;
+  if (!project.githubConnected) {
+    root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Setup</span></nav><section class="setup-complete"><span class="eyebrow">Manual project</span><h1>Choose an upload credential.</h1><p>This project is not connected to the GitHub App, so GitHub OIDC is unavailable. Create a scoped project token and store it as <code>SNAPPYDIFF_TOKEN</code> in your CI secret store.</p><a class="button primary" href="/projects/${encodeURIComponent(project.id)}/settings" data-link>Create project token</a></section>`);
+    return;
+  }
   const connected = Number(new URLSearchParams(location.search).get("connected") || 1);
   const configuration = JSON.stringify({
     endpoint: state.me.configuration.appOrigin,

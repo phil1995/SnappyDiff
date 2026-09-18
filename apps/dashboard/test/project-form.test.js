@@ -33,7 +33,7 @@ test("creates API-safe project slugs", () => {
 });
 
 test("does not route a stale project creation response", () => {
-  assert.equal(projectSetupPath("prj_1", 4, 4), "/projects/prj_1/setup");
+  assert.equal(projectSetupPath("prj_1", 4, 4), "/projects/prj_1/settings");
   assert.equal(projectSetupPath("prj_1", 4, 5), null);
 });
 
