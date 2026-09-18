@@ -31,6 +31,11 @@ export function projectSlug(value, fallback = "project") {
     .slice(0, 63)
     .replace(/-+$/g, "");
   if (slug) return slug;
-  const fallbackSlug = String(fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
+  const fallbackSlug = String(fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63).replace(/-+$/g, "");
   return fallbackSlug || "project";
+}
+
+export function projectSetupPath(projectId, requestGeneration, currentGeneration) {
+  if (requestGeneration !== currentGeneration) return null;
+  return `/projects/${encodeURIComponent(projectId)}/settings`;
 }

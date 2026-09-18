@@ -1,4 +1,4 @@
-import { parseGitHubRepository, projectSlug } from "./project-form.js";
+import { parseGitHubRepository, projectSetupPath, projectSlug } from "./project-form.js";
 
 const root = document.querySelector("#app");
 const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, swipe: .5, blinkTimer: null, worker: null, viewerGeneration: 0, routeGeneration: 0, comparisonId: null };
@@ -36,7 +36,7 @@ async function route() {
     if (routeGeneration !== state.routeGeneration) return;
     const path = location.pathname;
     if (path === "/github/callback") return await completeGitHubLink(routeGeneration);
-    if (path === "/projects/new") return renderNewProject();
+    if (path === "/projects/new") return renderNewProject(routeGeneration);
     const project = path.match(/^\/projects\/([^/]+)$/);
     const projectSettings = path.match(/^\/projects\/([^/]+)\/settings$/);
     const run = path.match(/^\/runs\/([^/]+)$/);
@@ -87,7 +87,7 @@ async function renderHome(routeGeneration) {
   root.innerHTML = header(`<section class="hero"><span class="eyebrow">Workspace</span><h1>Your visual changes,<br>in one sharp view.</h1><p>Open a project to inspect recent runs, compare pixels, and resolve snapshot changes.</p></section><div class="section-head"><h2>Projects</h2><div class="section-actions"><span class="muted">${projects.length} total</span>${admin && projects.length ? `<a class="button primary" href="/projects/new" data-link>New project</a>` : ""}</div></div>${cards ? `<div class="grid">${cards}</div>` : empty}`);
 }
 
-function renderNewProject() {
+function renderNewProject(routeGeneration) {
   if (state.me.user.role !== "admin") throw new Error("Only workspace administrators can create projects.");
   root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>New project</span></nav><section class="onboarding"><div class="onboarding-copy"><span class="eyebrow">New project</span><h1>Connect your snapshots.</h1><p>A project maps one GitHub repository to its snapshot history, baselines, and pull request checks.</p><ol class="setup-steps"><li><span>1</span><div><strong>Create the project</strong><small>Choose the repository and default branch.</small></div></li><li><span>2</span><div><strong>Connect GitHub</strong><small>Install the SnappyDiff App for this repository.</small></div></li><li><span>3</span><div><strong>Upload from CI</strong><small>Run your existing snapshot tests and upload their output.</small></div></li></ol></div><form class="project-form" data-project-create><h2>Project details</h2><label>Project name<input name="name" maxlength="100" required autofocus placeholder="My iOS App"><small>Shown to everyone in this workspace.</small></label><label>GitHub repository<input name="repository" required autocomplete="off" spellcheck="false" placeholder="owner/repository"><small>Paste owner/repository, a GitHub URL, or an SSH clone URL.</small></label><label>Default branch<input name="defaultBranch" maxlength="255" required value="main" spellcheck="false"><small>Usually main or master.</small></label><div class="form-error" data-project-error role="alert" hidden></div><div class="form-actions"><a class="button" href="/" data-link>Cancel</a><button class="button primary" type="submit">Create project</button></div></form></section>`);
   const form = root.querySelector("[data-project-create]");
@@ -118,7 +118,8 @@ function renderNewProject() {
           defaultBranch: String(values.get("defaultBranch") ?? "").trim(),
         }),
       });
-      navigate(`/projects/${encodeURIComponent(result.project.id)}/settings`, true);
+      const destination = projectSetupPath(result.project.id, routeGeneration, state.routeGeneration);
+      if (destination) navigate(destination, true);
     } catch (failure) {
       error.textContent = failure.message;
       error.hidden = false;
