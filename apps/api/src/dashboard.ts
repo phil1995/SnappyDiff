@@ -1,6 +1,7 @@
 import type { Session } from "./auth.ts";
 import { requirePermission } from "./authorization.ts";
 import { HttpError, json } from "./http.ts";
+import { localFixturePng } from "./local-fixtures.ts";
 import type { Env } from "./platform.ts";
 
 export async function listProjectRuns(env: Env, session: Session, projectId: string, before: string | null): Promise<Response> {
@@ -60,12 +61,20 @@ export async function getPrivateImage(env: Env, session: Session, imageId: strin
        AND EXISTS (SELECT 1 FROM screenshots s WHERE s.organization_id = i.organization_id AND s.image_id = i.id)
   `).bind(imageId, session.organizationId).first<{ storageKey: string; byteSize: number }>();
   if (!image) throw new HttpError(404, "image_not_found", "Image was not found");
+  if (env.APP_ENV === "local") {
+    const fixture = await localFixturePng(image.storageKey);
+    if (fixture) return privatePng(fixture.buffer.slice(fixture.byteOffset, fixture.byteOffset + fixture.byteLength) as ArrayBuffer);
+  }
   const object = await env.IMAGES.get(image.storageKey);
   if (!object || object.size !== image.byteSize) throw new HttpError(503, "image_unavailable", "Image storage is temporarily unavailable");
-  return new Response(object.body, {
+  return privatePng(object.body, object.size);
+}
+
+function privatePng(body: BodyInit, size?: number): Response {
+  return new Response(body, {
     headers: {
       "content-type": "image/png",
-      "content-length": String(object.size),
+      ...(size === undefined ? {} : { "content-length": String(size) }),
       "cache-control": "private, no-store",
       "content-security-policy": "default-src 'none'",
       "x-content-type-options": "nosniff",

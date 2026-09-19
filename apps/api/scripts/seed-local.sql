@@ -23,6 +23,15 @@ INSERT OR IGNORE INTO runs
   (id, organization_id, project_id, suite_id, provider, provider_run_id, attempt_number, run_key,
    commit_sha, branch, trust_class, expected_shards_json, state, logical_bytes, screenshot_count,
    deadline_at, completed_at, created_at, updated_at)
+VALUES ('run_local_baseline', 'org_local', 'prj_local_demo', 'ste_local_demo', 'github_actions',
+  'local-demo-baseline', 1, 'local-demo-baseline', '0000000000abcdef1234567890abcdef12345678', 'main',
+  'first_party', '["default"]', 'complete', 122880, 2, unixepoch() + 86400, unixepoch() - 3600,
+  unixepoch() - 3900, unixepoch() - 3600);
+
+INSERT OR IGNORE INTO runs
+  (id, organization_id, project_id, suite_id, provider, provider_run_id, attempt_number, run_key,
+   commit_sha, branch, trust_class, expected_shards_json, state, logical_bytes, screenshot_count,
+   deadline_at, completed_at, created_at, updated_at)
 VALUES ('run_local_demo', 'org_local', 'prj_local_demo', 'ste_local_demo', 'github_actions',
   'local-demo-1', 1, 'local-demo-1', '1234567890abcdef1234567890abcdef12345678', 'feature/local-preview',
   'first_party', '["default"]', 'complete', 184320, 3, unixepoch() + 86400, unixepoch(),
@@ -32,15 +41,43 @@ INSERT OR IGNORE INTO run_shards
   (id, organization_id, run_id, shard_key, expected_pages, received_pages, state, finalized_at)
 VALUES ('shd_local_demo', 'org_local', 'run_local_demo', 'default', 1, 1, 'verified', unixepoch());
 
+INSERT OR IGNORE INTO run_shards
+  (id, organization_id, run_id, shard_key, expected_pages, received_pages, state, finalized_at)
+VALUES ('shd_local_baseline', 'org_local', 'run_local_baseline', 'default', 1, 1, 'verified', unixepoch() - 3600);
+
+INSERT OR IGNORE INTO images
+  (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
+VALUES
+  ('img_local_baseline_detail', 'org_local', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'local-fixture/detail-baseline.png', 'image/png', 1, 960, 640),
+  ('img_local_current_detail', 'org_local', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'local-fixture/detail-current.png', 'image/png', 1, 960, 640),
+  ('img_local_baseline_home', 'org_local', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 'local-fixture/home-baseline.png', 'image/png', 1, 960, 640),
+  ('img_local_current_home', 'org_local', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 'local-fixture/home-current.png', 'image/png', 1, 960, 640),
+  ('img_local_current_new', 'org_local', 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'local-fixture/new-current.png', 'image/png', 1, 960, 640);
+
+INSERT OR IGNORE INTO screenshots (organization_id, run_id, shard_id, name, image_id)
+VALUES
+  ('org_local', 'run_local_baseline', 'shd_local_baseline', 'Examples/DetailScreen.png', 'img_local_baseline_detail'),
+  ('org_local', 'run_local_baseline', 'shd_local_baseline', 'Examples/HomeScreen.png', 'img_local_baseline_home'),
+  ('org_local', 'run_local_demo', 'shd_local_demo', 'Examples/DetailScreen.png', 'img_local_current_detail'),
+  ('org_local', 'run_local_demo', 'shd_local_demo', 'Examples/HomeScreen.png', 'img_local_current_home'),
+  ('org_local', 'run_local_demo', 'shd_local_demo', 'Examples/NewScreen.png', 'img_local_current_new');
+
 INSERT OR IGNORE INTO comparisons
   (id, organization_id, project_id, suite_id, current_run_id, added_count, removed_count,
    changed_count, unchanged_count, status)
 VALUES ('cmp_local_demo', 'org_local', 'prj_local_demo', 'ste_local_demo', 'run_local_demo',
   1, 0, 2, 0, 'action_required');
 
-INSERT OR IGNORE INTO comparison_entries
-  (organization_id, comparison_id, name, kind)
+UPDATE comparisons SET baseline_run_id = 'run_local_baseline'
+WHERE id = 'cmp_local_demo' AND organization_id = 'org_local';
+
+INSERT INTO comparison_entries
+  (organization_id, comparison_id, name, kind, baseline_image_id, current_image_id)
 VALUES
-  ('org_local', 'cmp_local_demo', 'Examples/DetailScreen.png', 'changed'),
-  ('org_local', 'cmp_local_demo', 'Examples/HomeScreen.png', 'changed'),
-  ('org_local', 'cmp_local_demo', 'Examples/NewScreen.png', 'added');
+  ('org_local', 'cmp_local_demo', 'Examples/DetailScreen.png', 'changed', 'img_local_baseline_detail', 'img_local_current_detail'),
+  ('org_local', 'cmp_local_demo', 'Examples/HomeScreen.png', 'changed', 'img_local_baseline_home', 'img_local_current_home'),
+  ('org_local', 'cmp_local_demo', 'Examples/NewScreen.png', 'added', NULL, 'img_local_current_new')
+ON CONFLICT (organization_id, comparison_id, name) DO UPDATE SET
+  kind = excluded.kind,
+  baseline_image_id = excluded.baseline_image_id,
+  current_image_id = excluded.current_image_id;

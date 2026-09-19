@@ -32,4 +32,18 @@ describe("private dashboard images", () => {
     assert.equal(response.headers.get("cache-control"), "private, no-store");
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([1, 2, 3]));
   });
+
+  it("renders authorized demo fixtures only in the local environment", async () => {
+    const statement = { bind: () => statement, first: async () => ({ storageKey: "local-fixture/detail-current.png", byteSize: 1 }) };
+    const environment = {
+      APP_ENV: "local", DB: { prepare: () => statement },
+      IMAGES: { get: () => assert.fail("local fixtures must not read R2") },
+    } as never;
+    const response = await getPrivateImage(environment, viewer, "img_local_current_detail");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    assert.deepEqual(bytes.slice(0, 8), new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+    const dimensions = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    assert.equal(dimensions.getUint32(16), 960);
+    assert.equal(dimensions.getUint32(20), 640);
+  });
 });
