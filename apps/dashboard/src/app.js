@@ -1,4 +1,5 @@
 import { configureUploadStep, createKeyStep, findNewProject, oidcUploadWorkflow, waitForUploadStep } from "./upload-setup.js";
+import { comparisonNavigation } from "./comparison-navigation.js";
 
 const root = document.querySelector("#app");
 const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, swipe: .5, blinkTimer: null, worker: null, viewerGeneration: 0, routeGeneration: 0, comparisonId: null };
@@ -271,15 +272,17 @@ async function renderComparison(comparisonId, routeGeneration = state.routeGener
   const comparison = payload.comparison;
   const sidebar = state.entries.map(entryButton).join("");
   const status = `<span class="pill ${escapeHtml(comparison.status)}">${escapeHtml(comparison.status.replaceAll("_", " "))}</span>`;
-  const reviewActions = comparison.status === "action_required" ? `<section class="review-actions"><label for="review-note">Review note</label><textarea id="review-note" class="note" maxlength="2000" placeholder="Optional note"></textarea><div class="decision"><button class="button primary" data-decision="accepted">Accept changes</button><button class="button danger" data-decision="rejected">Reject</button></div></section>` : "";
-  const content = `<div class="review-layout"><aside class="review-sidebar"><nav class="crumbs"><a href="/projects/${encodeURIComponent(comparison.projectId)}" data-link>${escapeHtml(comparison.projectName)}</a><span>/</span><span>${escapeHtml(shortSha(comparison.commitSha))}</span></nav><div id="entries">${sidebar || `<div class="empty">No screenshots</div>`}</div>${payload.nextCursor ? `<button class="button" data-load-more="${escapeHtml(payload.nextCursor)}">Load more</button>` : ""}</aside><section class="review-main"><div class="review-head"><div><span class="eyebrow">${escapeHtml(comparison.branch)}</span><div class="review-title"><h2>Visual comparison</h2>${status}</div><div class="counts"><span><b>${comparison.changedCount}</b> changed</span><span><b>${comparison.addedCount}</b> added</span><span><b>${comparison.removedCount}</b> removed</span></div></div></div><div id="viewer"></div>${reviewActions}</section></div>`;
+  const navigation = `<div class="entry-navigation"><button class="button" data-entry-prev aria-label="Previous screenshot">← Previous</button><span><b data-entry-position>${state.entries.length ? state.selected + 1 : 0}</b> of <b data-entry-total>${state.entries.length}</b></span><button class="button" data-entry-next aria-label="Next screenshot">Next →</button></div>`;
+  const decision = comparison.status === "action_required" ? `<div class="review-note"><label for="review-note">Notes <span>Optional</span></label><textarea id="review-note" class="note" maxlength="2000" placeholder="Add context for this review…"></textarea></div><div class="review-footer">${navigation}<div class="decision"><button class="button danger" data-decision="rejected">Reject</button><button class="button primary" data-decision="accepted">Accept changes</button></div></div>` : `<div class="review-footer">${navigation}</div>`;
+  const reviewActions = `<section class="review-actions">${decision}</section>`;
+  const content = `<div class="review-layout"><section class="review-main"><nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(comparison.projectId)}" data-link>${escapeHtml(comparison.projectName)}</a><span>/</span><span>${escapeHtml(shortSha(comparison.commitSha))}</span></nav><div class="review-head"><div><span class="eyebrow">${escapeHtml(comparison.branch)}</span><div class="review-title"><h1>Visual comparison</h1>${status}</div><div class="comparison-meta"><span class="sha">${escapeHtml(shortSha(comparison.commitSha))}</span><div class="counts"><span><b>${comparison.changedCount}</b> changed</span><span><b>${comparison.addedCount}</b> added</span><span><b>${comparison.removedCount}</b> removed</span></div></div></div></div><div id="viewer"></div>${reviewActions}</section><aside class="review-sidebar"><div class="changes-head"><div><span class="eyebrow">Review queue</span><h2>Changes</h2></div><span class="change-total">${state.entries.length}</span></div><div id="entries">${sidebar || `<div class="empty">No screenshots</div>`}</div>${payload.nextCursor ? `<button class="button load-more" data-load-more="${escapeHtml(payload.nextCursor)}">Load more</button>` : ""}</aside></div>`;
   root.innerHTML = header(content, true);
   bindComparison(comparisonId, comparison, routeGeneration);
-  renderSelected();
+  selectEntry(state.selected);
 }
 
 function entryButton(entry, index) {
-  return `<button class="entry ${index === state.selected ? "active" : ""}" data-entry="${index}" data-kind="${escapeHtml(entry.kind)}"><span class="entry-dot"></span><span class="entry-name">${escapeHtml(entry.name)}</span></button>`;
+  return `<button class="entry ${index === state.selected ? "active" : ""}" data-entry="${index}" data-kind="${escapeHtml(entry.kind)}"><span class="entry-dot"></span><span class="entry-copy"><span class="entry-name">${escapeHtml(entry.name)}</span><span class="entry-kind">${escapeHtml(entry.kind)}</span></span></button>`;
 }
 
 function bindComparison(comparisonId, comparison, routeGeneration) {
@@ -296,6 +299,8 @@ function bindComparison(comparisonId, comparison, routeGeneration) {
       const offset = state.entries.length;
       state.entries.push(...next.entries);
       root.querySelector("#entries").insertAdjacentHTML("beforeend", next.entries.map((entry, index) => entryButton(entry, offset + index)).join(""));
+      root.querySelector(".change-total").textContent = String(state.entries.length);
+      syncEntryNavigation();
       if (next.nextCursor) { button.dataset.loadMore = next.nextCursor; button.disabled = false; } else button.remove();
     } catch (error) { button.textContent = error.message; }
   });
@@ -307,14 +312,30 @@ function bindComparison(comparisonId, comparison, routeGeneration) {
       await renderComparison(comparisonId, routeGeneration);
     } catch (error) { button.disabled = false; button.textContent = error.message; }
   }));
+  root.querySelector("[data-entry-prev]")?.addEventListener("click", () => selectEntry(state.selected - 1));
+  root.querySelector("[data-entry-next]")?.addEventListener("click", () => selectEntry(state.selected + 1));
   document.title = `${shortSha(comparison.commitSha)} · SnappyDiff`;
 }
 
 function selectEntry(index) {
-  state.selected = Math.max(0, Math.min(index, state.entries.length - 1));
+  state.selected = index;
+  syncEntryNavigation();
   root.querySelectorAll("[data-entry]").forEach((button) => button.classList.toggle("active", Number(button.dataset.entry) === state.selected));
   root.querySelector(`[data-entry="${state.selected}"]`)?.scrollIntoView({ block: "nearest" });
   renderSelected();
+}
+
+function syncEntryNavigation() {
+  const navigation = comparisonNavigation(state.selected, state.entries.length);
+  state.selected = navigation.selected;
+  const position = root.querySelector("[data-entry-position]");
+  const total = root.querySelector("[data-entry-total]");
+  if (position) position.textContent = String(navigation.position);
+  if (total) total.textContent = String(navigation.total);
+  const previous = root.querySelector("[data-entry-prev]");
+  const next = root.querySelector("[data-entry-next]");
+  if (previous) previous.disabled = navigation.previousDisabled;
+  if (next) next.disabled = navigation.nextDisabled;
 }
 
 function imageUrl(id) { return id ? `/api/v1/images/${encodeURIComponent(id)}/content` : null; }
