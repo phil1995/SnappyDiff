@@ -41,7 +41,7 @@ npm test
 
 Local D1 and R2 emulation use Wrangler and do not require cloud credentials. See `docs/deployment.md` before creating remote resources or secrets.
 
-The dashboard generates a self-contained CI step using `SNAPPYDIFF_ENDPOINT` and a workspace upload key stored as the `SNAPPYDIFF_TOKEN` repository secret. No checked-in SnappyDiff configuration file is required. The first upload detects the repository and creates its project automatically.
+The dashboard generates a self-contained Point-Free SnapshotTesting workflow using the repository-root GitHub Action, `SNAPPYDIFF_ENDPOINT`, and a workspace upload key stored as the `SNAPPYDIFF_TOKEN` repository secret. The action installs a checksum-verified CLI release, discovers `__Snapshots__` directories, and overlays current images written through `SNAPSHOT_ARTIFACTS`. No checked-in SnappyDiff configuration file is required. The first upload detects the repository and creates its project automatically.
 
 The complete retry, sharding, deduplication, and verification contract is documented in `docs/upload-protocol.md`.
 Baseline recovery, scoped-token rotation, PR pin reconciliation, and retention cleanup are documented in `docs/operations.md`.

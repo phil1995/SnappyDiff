@@ -15,6 +15,10 @@ Abandoned sessions expire after 24 hours. Cleanup releases reserved bytes and de
 
 Create a workspace upload key in the dashboard and supply it as `SNAPPYDIFF_TOKEN` through the CI secret store. Set `SNAPPYDIFF_ENDPOINT` in the workflow and pass optional settings such as `--concurrency` on the upload command; no checked-in configuration file is required. The CLI detects `GITHUB_REPOSITORY` in GitHub Actions and otherwise reads the `origin` Git remote. `SNAPPYDIFF_REPOSITORY=owner/name` is available as an explicit override.
 
+For Point-Free Swift SnapshotTesting, set `SNAPSHOT_ARTIFACTS` on the snapshot test step and create that directory before testing. Run the uploader afterward with `if: always()`, `--discover`, and `--artifacts "$SNAPSHOT_ARTIFACTS"`. Discovery includes PNGs only below `__Snapshots__`; current failure artifacts replace their matching references by full test-directory-relative identity. Ambiguous mappings fail instead of uploading the wrong image. `--xcresult <bundle>` is a fallback for a single unambiguous Point-Free failure attachment per test; multi-snapshot tests must use `SNAPSHOT_ARTIFACTS` because Xcode's attachment manifest does not expose assertion-level identity.
+
+The repository-root composite action installs a checksum-verified CLI release and invokes this flow. Release tags build native macOS Apple Silicon, macOS Intel, and Linux x86_64 archives. The action and installer are usable from other repositories once this repository and the corresponding release are publicly accessible.
+
 The `login` command is intentionally gated until the WorkOS device-authorization spike in `docs/provider-validation.md` has passed. Workspace keys support other CI systems and automatically group uploads by repository. In GitHub Actions, the CLI automatically uses OIDC when `SNAPPYDIFF_TOKEN` is absent and the GitHub App is connected.
 
 ## Limits

@@ -1,11 +1,25 @@
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 
+export function pointfreeArtifactEnvironment() {
+  return `env:
+  SNAPSHOT_ARTIFACTS: \${{ runner.temp }}/snappydiff-artifacts`;
+}
+
+export function prepareArtifactsWorkflow() {
+  return `- name: Prepare snapshot artifacts
+  run: mkdir -p "\$SNAPSHOT_ARTIFACTS"
+  env:
+    SNAPSHOT_ARTIFACTS: \${{ runner.temp }}/snappydiff-artifacts`;
+}
+
 export function uploadWorkflow(endpoint) {
   return `- name: Upload snapshots
-  env:
-    SNAPPYDIFF_TOKEN: \${{ secrets.SNAPPYDIFF_TOKEN }}
-    SNAPPYDIFF_ENDPOINT: ${endpoint}
-  run: snappydiff upload ./Snapshots --concurrency 4`;
+  if: always()
+  uses: phil1995/SnappyDiff@v0.1.0
+  with:
+    token: \${{ secrets.SNAPPYDIFF_TOKEN }}
+    endpoint: ${endpoint}
+    artifacts: \${{ runner.temp }}/snappydiff-artifacts`;
 }
 
 export function oidcUploadWorkflow(endpoint, audience) {
@@ -25,7 +39,7 @@ export function createKeyStep(activeTokenCount) {
 }
 
 export function configureUploadStep(token, endpoint) {
-  return `<section class="setup-wizard setup-wizard-wide"><span class="step-label">Step 2 of 3</span><h1>Add SnappyDiff to CI</h1><label>Repository secret · SNAPPYDIFF_TOKEN</label><div class="secret secret-copy"><code data-workspace-token>${escapeHtml(token)}</code><button class="button" type="button" data-copy-token>Copy</button></div><p class="muted compact">Save this as a GitHub Actions repository secret. The key is only shown once.</p><label>Workflow step</label><pre><code>${escapeHtml(uploadWorkflow(endpoint))}</code></pre><div class="form-actions"><button class="button primary" type="button" data-setup-done>Done</button></div></section>`;
+  return `<section class="setup-wizard setup-wizard-wide"><span class="step-label">Step 2 of 3</span><h1>Add SnappyDiff to CI</h1><label>Repository secret · SNAPPYDIFF_TOKEN</label><div class="secret secret-copy"><code data-workspace-token>${escapeHtml(token)}</code><button class="button" type="button" data-copy-token>Copy</button></div><p class="muted compact">Save this as a GitHub Actions repository secret. The key is only shown once.</p><label>1 · Add to your existing snapshot test step</label><pre><code>${escapeHtml(pointfreeArtifactEnvironment())}</code></pre><label>2 · Add immediately before the snapshot test step</label><pre><code>${escapeHtml(prepareArtifactsWorkflow())}</code></pre><label>3 · Add immediately after the snapshot test step</label><pre><code>${escapeHtml(uploadWorkflow(endpoint))}</code></pre><div class="form-actions"><button class="button primary" type="button" data-setup-done>Done</button></div></section>`;
 }
 
 export function waitForUploadStep(message = "") {

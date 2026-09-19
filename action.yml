@@ -1,0 +1,44 @@
+name: Upload snapshots to SnappyDiff
+description: Discover and upload Point-Free Swift snapshots without adding a Swift dependency.
+inputs:
+  token:
+    description: Workspace upload key. Store this in the SNAPPYDIFF_TOKEN repository secret.
+    required: true
+  endpoint:
+    description: SnappyDiff service origin.
+    required: true
+  directory:
+    description: Repository root to search for __Snapshots__ directories.
+    default: .
+  artifacts:
+    description: Directory assigned to SNAPSHOT_ARTIFACTS during the snapshot test step.
+    required: false
+  xcresult:
+    description: Optional Xcode result bundle used when SNAPSHOT_ARTIFACTS is unavailable.
+    required: false
+  version:
+    description: CLI release tag to install.
+    default: v0.1.0
+runs:
+  using: composite
+  steps:
+    - name: Install SnappyDiff CLI
+      shell: bash
+      env:
+        SNAPPYDIFF_VERSION: ${{ inputs.version }}
+        SNAPPYDIFF_INSTALL_DIR: ${{ runner.temp }}/snappydiff-bin
+      run: bash "$GITHUB_ACTION_PATH/scripts/install.sh"
+    - name: Upload snapshots
+      shell: bash
+      env:
+        INPUT_DIRECTORY: ${{ inputs.directory }}
+        INPUT_ARTIFACTS: ${{ inputs.artifacts }}
+        INPUT_XCRESULT: ${{ inputs.xcresult }}
+        SNAPPYDIFF_TOKEN: ${{ inputs.token }}
+        SNAPPYDIFF_ENDPOINT: ${{ inputs.endpoint }}
+        SNAPPYDIFF_BIN: ${{ runner.temp }}/snappydiff-bin/snappydiff
+      run: |
+        arguments=(upload "$INPUT_DIRECTORY" --discover)
+        if [[ -n "$INPUT_ARTIFACTS" ]]; then arguments+=(--artifacts "$INPUT_ARTIFACTS"); fi
+        if [[ -n "$INPUT_XCRESULT" ]]; then arguments+=(--xcresult "$INPUT_XCRESULT"); fi
+        "$SNAPPYDIFF_BIN" "${arguments[@]}"

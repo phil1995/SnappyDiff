@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { configureUploadStep, findNewProject, oidcUploadWorkflow, uploadWorkflow, waitForUploadStep } from "../src/upload-setup.js";
+import { parse } from "yaml";
+import { configureUploadStep, findNewProject, oidcUploadWorkflow, pointfreeArtifactEnvironment, prepareArtifactsWorkflow, uploadWorkflow, waitForUploadStep } from "../src/upload-setup.js";
+
+const parseStep = (source) => parse(`steps:\n${source.split("\n").map((line) => `  ${line}`).join("\n")}`).steps[0];
 
 test("workflow is self-contained without a configuration file", () => {
   const workflow = uploadWorkflow("https://snapshots.example.test");
-  assert.match(workflow, /SNAPPYDIFF_TOKEN: \$\{\{ secrets\.SNAPPYDIFF_TOKEN \}\}/);
-  assert.match(workflow, /SNAPPYDIFF_ENDPOINT: https:\/\/snapshots\.example\.test/);
-  assert.match(workflow, /--concurrency 4/);
+  assert.match(workflow, /uses: phil1995\/SnappyDiff@v0\.1\.0/);
+  assert.match(workflow, /token: \$\{\{ secrets\.SNAPPYDIFF_TOKEN \}\}/);
+  assert.match(workflow, /endpoint: https:\/\/snapshots\.example\.test/);
+  assert.match(pointfreeArtifactEnvironment(), /SNAPSHOT_ARTIFACTS: \$\{\{ runner\.temp \}\}\/snappydiff-artifacts/);
+  assert.match(workflow, /if: always\(\)/);
   assert.doesNotMatch(workflow, /\.snappydiff\.json/);
+  assert.equal(parseStep(workflow).with.endpoint, "https://snapshots.example.test");
+  assert.equal(parseStep(prepareArtifactsWorkflow()).name, "Prepare snapshot artifacts");
+  assert.equal(parse(pointfreeArtifactEnvironment()).env.SNAPSHOT_ARTIFACTS, "${{ runner.temp }}/snappydiff-artifacts");
 });
 
 test("OIDC workflow includes a nondefault audience", () => {
