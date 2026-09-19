@@ -1,3 +1,5 @@
+import { configureUploadStep, createKeyStep, findNewProject, oidcUploadWorkflow, waitForUploadStep } from "./upload-setup.js";
+
 const root = document.querySelector("#app");
 const state = { me: null, entries: [], selected: 0, mode: "overlay", zoom: 1, swipe: .5, blinkTimer: null, worker: null, viewerGeneration: 0, routeGeneration: 0, comparisonId: null };
 
@@ -15,7 +17,8 @@ async function api(path, options = {}) {
 }
 
 function header(content, full = false) {
-  const account = state.me ? `<div class="account"><span>${escapeHtml(state.me.user.email)}</span><button data-logout>Sign out</button></div>` : "";
+  const keySettings = state.me?.user.role === "admin" ? `<a href="/settings/tokens" data-link>Workspace keys</a>` : "";
+  const account = state.me ? `<div class="account"><span>${escapeHtml(state.me.user.email)}</span>${keySettings}<button data-logout>Sign out</button></div>` : "";
   return `<div class="shell"><header class="topbar"><a class="brand" href="/" data-link><span class="brand-mark">↗</span>SnappyDiff</a>${account}</header>${full ? content : `<main class="page">${content}</main>`}</div>`;
 }
 
@@ -35,6 +38,7 @@ async function route() {
     const path = location.pathname;
     if (path === "/github/callback") return await completeGitHubCallback(routeGeneration);
     if (path === "/projects/new") return await renderNewProject(routeGeneration);
+    if (path === "/settings/tokens") return await renderWorkspaceTokens(routeGeneration);
     const project = path.match(/^\/projects\/([^/]+)$/);
     const projectSetup = path.match(/^\/projects\/([^/]+)\/setup$/);
     const projectSettings = path.match(/^\/projects\/([^/]+)\/settings$/);
@@ -100,27 +104,60 @@ async function renderHome(routeGeneration) {
 
 async function renderNewProject(routeGeneration) {
   if (state.me.user.role !== "admin") throw new Error("Only workspace administrators can create projects.");
-  const { tokens } = await api("/api/v1/workspace-tokens");
+  const [{ tokens }, { projects }] = await Promise.all([api("/api/v1/workspace-tokens"), api("/api/v1/projects")]);
   if (routeGeneration !== state.routeGeneration) return;
   const activeTokens = tokens.filter((token) => !token.revokedAt);
-  const tokenRows = tokens.map((token) => `<div class="management-row"><div><strong>${escapeHtml(token.name)}</strong><small>${escapeHtml(token.tokenPrefix)}… · expires ${formatDate(token.expiresAt)}${token.revokedAt ? " · revoked" : ""}</small></div>${token.revokedAt ? "" : `<button class="button danger" data-revoke-workspace-token="${escapeHtml(token.id)}">Revoke</button>`}</div>`).join("");
-  const configuration = JSON.stringify({ endpoint: state.me.configuration.appOrigin, uploadConcurrency: 4 }, null, 2);
-  const workflow = `- name: Upload snapshots\n  env:\n    SNAPPYDIFF_TOKEN: \${{ secrets.SNAPPYDIFF_TOKEN }}\n  run: snappydiff upload ./Snapshots`;
-  const connected = new URLSearchParams(location.search).get("github") === "connected";
-  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Upload setup</span></nav><section class="setup-complete"><span class="eyebrow">Upload-first setup</span><h1>One key. Any repository.</h1><p>Add the workspace key to CI. The first upload detects its repository and creates the project automatically.</p>${connected ? `<div class="success-mark">✓</div><p>GitHub is connected for pull request checks.</p>` : ""}</section><div class="setup-grid"><section class="settings-card"><span class="step-label">1 · Workspace secret</span><h2>SNAPPYDIFF_TOKEN</h2><p class="muted">The key can upload from multiple repositories. Each repository becomes its own project.</p><form data-workspace-token-create><label>Key name<input name="name" maxlength="100" value="CI uploads" required></label><label>Expiry days<input name="expiresInDays" type="number" min="1" max="365" value="365"></label><button class="button primary">Create workspace key</button></form><div data-workspace-token-secret></div><p class="muted">${activeTokens.length} active workspace ${activeTokens.length === 1 ? "key" : "keys"}.</p><div>${tokenRows}</div></section><section class="settings-card"><span class="step-label">2 · Commit this file</span><h2>.snappydiff.json</h2><pre><code>${escapeHtml(configuration)}</code></pre></section><section class="settings-card wide"><span class="step-label">3 · Add after snapshot tests</span><h2>GitHub Actions</h2><pre><code>${escapeHtml(workflow)}</code></pre><p class="muted">Replace the snapshot directory with the directory produced by your tests.</p></section><section class="settings-card wide"><h2>Optional GitHub integration</h2><p class="muted">Connect the GitHub App for pull request checks and secretless OIDC uploads. It is not required to create projects or upload snapshots.</p><button class="button" data-github-connect>Connect or sync GitHub</button></section></div>`);
+  const initialProjectIds = new Set(projects.map((project) => project.id));
+  const showStep = (content) => { root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Upload setup</span></nav>${content}`); };
+  showStep(createKeyStep(activeTokens.length));
   root.querySelector("[data-workspace-token-create]").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const result = await settingsAction(event.submitter, () => api("/api/v1/workspace-tokens", { method: "POST", body: JSON.stringify({ name: form.get("name"), expiresInDays: Number(form.get("expiresInDays")) }) }));
-    if (result && routeGeneration === state.routeGeneration) root.querySelector("[data-workspace-token-secret]").innerHTML = `<div class="secret"><strong>Copy now—shown once</strong><code>${escapeHtml(result.token)}</code></div>`;
+    if (!result || routeGeneration !== state.routeGeneration) return;
+    showStep(configureUploadStep(result.token, state.me.configuration.appOrigin));
+    root.querySelector("[data-copy-token]").addEventListener("click", copyWorkspaceToken);
+    root.querySelector("[data-setup-done]").addEventListener("click", () => {
+      showStep(waitForUploadStep());
+      bindUploadRefresh(showStep, routeGeneration, initialProjectIds);
+    });
   });
-  root.querySelector("[data-github-connect]").addEventListener("click", async (event) => {
-    const result = await settingsAction(event.currentTarget, () => api("/api/v1/github/installations/authorize", { method: "POST", body: "{}" }));
-    if (result) location.assign(result.installationUrl);
+}
+
+async function copyWorkspaceToken(event) {
+  const button = event.currentTarget;
+  const token = root.querySelector("[data-workspace-token]")?.textContent;
+  if (!token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    button.textContent = "Copied";
+  } catch { button.textContent = "Copy failed"; }
+}
+
+function bindUploadRefresh(showStep, routeGeneration, initialProjectIds) {
+  root.querySelector("[data-refresh-projects]")?.addEventListener("click", async (event) => {
+    const result = await settingsAction(event.currentTarget, () => api("/api/v1/projects"));
+    if (!result || routeGeneration !== state.routeGeneration) return;
+    const project = findNewProject(result.projects, initialProjectIds);
+    if (project) return navigate(`/projects/${encodeURIComponent(project.id)}`);
+    showStep(waitForUploadStep("No upload received yet."));
+    bindUploadRefresh(showStep, routeGeneration, initialProjectIds);
   });
+}
+
+async function renderWorkspaceTokens(routeGeneration) {
+  if (state.me.user.role !== "admin") throw new Error("Only workspace administrators can manage upload keys.");
+  const { tokens } = await api("/api/v1/workspace-tokens");
+  if (routeGeneration !== state.routeGeneration) return;
+  const rows = tokens.map((token) => `<div class="management-row"><div><strong>${escapeHtml(token.name)}</strong><small>${escapeHtml(token.tokenPrefix)}… · expires ${formatDate(token.expiresAt)}${token.revokedAt ? " · revoked" : ""}</small></div>${token.revokedAt ? "" : `<button class="button danger" data-revoke-workspace-token="${escapeHtml(token.id)}">Revoke</button>`}</div>`).join("");
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Workspace keys</span></nav><div class="title-row"><h1>Workspace keys</h1><a class="button primary" href="/projects/new" data-link>Create key</a></div><section class="settings-card token-management">${rows || `<div class="empty">No workspace keys have been created.</div>`}</section>`);
   root.querySelectorAll("[data-revoke-workspace-token]").forEach((button) => button.addEventListener("click", async () => {
-    await settingsAction(button, () => api(`/api/v1/tokens/${encodeURIComponent(button.dataset.revokeWorkspaceToken)}`, { method: "DELETE" }));
-    if (routeGeneration === state.routeGeneration) await renderNewProject(routeGeneration);
+    let revoked = false;
+    await settingsAction(button, async () => {
+      await api(`/api/v1/tokens/${encodeURIComponent(button.dataset.revokeWorkspaceToken)}`, { method: "DELETE" });
+      revoked = true;
+    });
+    if (revoked && routeGeneration === state.routeGeneration) await renderWorkspaceTokens(routeGeneration);
   }));
 }
 
@@ -131,14 +168,8 @@ async function renderProjectSetup(projectId, routeGeneration) {
     root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Setup</span></nav><section class="setup-complete"><span class="eyebrow">Workspace uploads</span><h1>This project is created automatically.</h1><p>Use a workspace upload key in CI. SnappyDiff detects this repository and routes uploads here without a project ID.</p><a class="button primary" href="/projects/new" data-link>Open upload setup</a></section>`);
     return;
   }
-  const connected = Number(new URLSearchParams(location.search).get("connected") || 1);
-  const configuration = JSON.stringify({
-    endpoint: state.me.configuration.appOrigin,
-    uploadConcurrency: 4,
-    oidcAudience: state.me.configuration.oidcAudience,
-  }, null, 2);
-  const workflow = `permissions:\n  contents: read\n  id-token: write\n  checks: read\n\nsteps:\n  - uses: actions/checkout@v4\n    with:\n      fetch-depth: 0\n  # Add this after your existing snapshot test step.\n  - name: Upload snapshots\n    run: snappydiff upload ./Snapshots`;
-  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Setup</span></nav><section class="setup-complete"><span class="success-mark">✓</span><span class="eyebrow">GitHub connected</span><h1>${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</h1><p>${connected > 1 ? `${connected} repositories were connected. Here is the setup for the first one.` : "The project was created from GitHub and is ready for CI."}</p></section><div class="setup-grid"><section class="settings-card"><span class="step-label">1 · Commit this file</span><h2>.snappydiff.json</h2><pre><code>${escapeHtml(configuration)}</code></pre></section><section class="settings-card"><span class="step-label">2 · Add to GitHub Actions</span><h2>Upload after your tests</h2><pre><code>${escapeHtml(workflow)}</code></pre><p class="muted">Replace the test command and snapshot directory with the paths used by this repository.</p></section></div><div class="form-actions"><a class="button" href="/" data-link>All projects</a><a class="button primary" href="/projects/${encodeURIComponent(project.id)}" data-link>Open project</a></div>`);
+  const workflow = `permissions:\n  contents: read\n  id-token: write\n  checks: read\n\nsteps:\n  - uses: actions/checkout@v4\n    with:\n      fetch-depth: 0\n  # Add this after your existing snapshot test step.\n${oidcUploadWorkflow(state.me.configuration.appOrigin, state.me.configuration.oidcAudience).split("\n").map((line) => `  ${line}`).join("\n")}`;
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>Setup</span></nav><section class="setup-wizard setup-wizard-wide"><span class="step-label">GitHub Actions</span><h1>${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</h1><pre><code>${escapeHtml(workflow)}</code></pre><div class="form-actions"><a class="button" href="/" data-link>All projects</a><a class="button primary" href="/projects/${encodeURIComponent(project.id)}" data-link>Open project</a></div></section>`);
 }
 
 async function renderProject(projectId, routeGeneration) {

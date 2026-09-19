@@ -13,7 +13,7 @@ Abandoned sessions expire after 24 hours. Cleanup releases reserved bytes and de
 
 ## CLI configuration
 
-Copy `.snappydiff.example.json` to `.snappydiff.json` and commit the non-secret endpoint and desired concurrency. Create a workspace upload key in the dashboard and supply it as `SNAPPYDIFF_TOKEN` through the CI secret store. The CLI detects `GITHUB_REPOSITORY` in GitHub Actions and otherwise reads the `origin` Git remote. `SNAPPYDIFF_REPOSITORY=owner/name` is available as an explicit override.
+Create a workspace upload key in the dashboard and supply it as `SNAPPYDIFF_TOKEN` through the CI secret store. Set `SNAPPYDIFF_ENDPOINT` in the workflow and pass optional settings such as `--concurrency` on the upload command; no checked-in configuration file is required. The CLI detects `GITHUB_REPOSITORY` in GitHub Actions and otherwise reads the `origin` Git remote. `SNAPPYDIFF_REPOSITORY=owner/name` is available as an explicit override.
 
 The `login` command is intentionally gated until the WorkOS device-authorization spike in `docs/provider-validation.md` has passed. Workspace keys support other CI systems and automatically group uploads by repository. In GitHub Actions, the CLI automatically uses OIDC when `SNAPPYDIFF_TOKEN` is absent and the GitHub App is connected.
 
