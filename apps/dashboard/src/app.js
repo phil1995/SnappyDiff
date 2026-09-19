@@ -17,9 +17,25 @@ async function api(path, options = {}) {
 }
 
 function header(content, full = false) {
-  const keySettings = state.me?.user.role === "admin" ? `<a href="/settings/tokens" data-link>Workspace keys</a>` : "";
-  const account = state.me ? `<div class="account"><span>${escapeHtml(state.me.user.email)}</span>${keySettings}<button data-logout>Sign out</button></div>` : "";
-  return `<div class="shell"><header class="topbar"><a class="brand" href="/" data-link><span class="brand-mark">↗</span>SnappyDiff</a>${account}</header>${full ? content : `<main class="page">${content}</main>`}</div>`;
+  const path = location.pathname;
+  const projectsActive = path === "/" || path.startsWith("/projects");
+  const keysActive = path === "/settings/tokens";
+  const email = state.me?.user.email ?? "";
+  const initial = email.slice(0, 1).toUpperCase() || "S";
+  const keySettings = state.me?.user.role === "admin" ? `<a class="nav-item ${keysActive ? "active" : ""}" href="/settings/tokens" data-link><span class="nav-icon">${icon("key")}</span><span>Workspace keys</span></a>` : "";
+  const mobileKeySettings = state.me?.user.role === "admin" ? `<a href="/settings/tokens" data-link>Keys</a>` : "";
+  const account = state.me ? `<div class="sidebar-account"><span class="avatar">${escapeHtml(initial)}</span><span class="account-copy"><strong>${escapeHtml(email)}</strong><small>${escapeHtml(state.me.user.role)}</small></span><button data-logout aria-label="Sign out" title="Sign out">${icon("logout")}</button></div>` : "";
+  return `<div class="shell"><aside class="app-sidebar"><a class="brand" href="/" data-link><span class="brand-mark">${icon("brand")}</span><span>SnappyDiff</span></a><nav class="primary-nav" aria-label="Main navigation"><a class="nav-item ${projectsActive ? "active" : ""}" href="/" data-link><span class="nav-icon">${icon("projects")}</span><span>Projects</span></a></nav><div class="sidebar-spacer"></div><nav class="secondary-nav" aria-label="Workspace navigation">${keySettings}</nav>${account}</aside><div class="app-frame"><header class="mobile-topbar"><a class="brand" href="/" data-link><span class="brand-mark">${icon("brand")}</span><span>SnappyDiff</span></a><nav class="mobile-nav" aria-label="Mobile navigation"><a href="/" data-link>Projects</a>${mobileKeySettings}<button data-logout>Sign out</button></nav></header><main class="page ${full ? "page-review" : ""}">${content}</main></div></div>`;
+}
+
+function icon(name) {
+  const paths = {
+    brand: `<rect x="3" y="3" width="11" height="11" rx="2"></rect><rect x="10" y="10" width="11" height="11" rx="2"></rect>`,
+    projects: `<path d="M3 6.5h6l1.6 2H21v10.5H3z"></path><path d="M3 9h18"></path>`,
+    key: `<circle cx="8.5" cy="10" r="4"></circle><path d="m11.5 12.5 7 7M16 17l2-2M13.5 14.5l2-2"></path>`,
+    logout: `<path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10"></path>`,
+  };
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] ?? ""}</svg>`;
 }
 
 function errorPage(error) {
@@ -95,11 +111,11 @@ async function renderHome(routeGeneration) {
   const { projects } = await api("/api/v1/projects");
   if (routeGeneration !== state.routeGeneration) return;
   const admin = state.me.user.role === "admin";
-  const cards = projects.map((project) => `<a class="card" href="/projects/${encodeURIComponent(project.id)}" data-link><h2>${escapeHtml(project.name)}</h2><div class="repo">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</div><p class="muted">Default branch · ${escapeHtml(project.defaultBranch)}</p></a>`).join("");
+  const rows = projects.map((project) => `<a class="project-row" href="/projects/${encodeURIComponent(project.id)}" data-link><span class="project-identity"><span class="project-avatar">${escapeHtml(project.name.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHtml(project.name)}</strong><small>${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</small></span></span><span class="project-branch"><span class="mobile-label">Default branch</span>${escapeHtml(project.defaultBranch)}</span><span class="row-arrow" aria-hidden="true">→</span></a>`).join("");
   const empty = admin
     ? `<section class="empty onboarding-empty"><span class="eyebrow">Get started</span><h2>Upload your first snapshots</h2><p>Create one workspace key, add it to CI, and run the uploader. SnappyDiff detects the repository and creates its project automatically.</p><a class="button primary" href="/projects/new" data-link>Set up uploads</a></section>`
     : `<div class="empty">No projects are available yet. A project appears after its first snapshot upload.</div>`;
-  root.innerHTML = header(`<section class="hero"><span class="eyebrow">Workspace</span><h1>Your visual changes,<br>in one sharp view.</h1><p>Open a project to inspect recent runs, compare pixels, and resolve snapshot changes.</p></section><div class="section-head"><h2>Projects</h2><div class="section-actions"><span class="muted">${projects.length} total</span>${admin ? `<a class="button primary" href="/projects/new" data-link>Upload setup</a>` : ""}</div></div>${cards ? `<div class="grid">${cards}</div>` : empty}`);
+  root.innerHTML = header(`<div class="page-heading"><div><h1>Projects</h1><p>Manage visual snapshots and review recent runs.</p></div>${admin ? `<a class="button primary" href="/projects/new" data-link>Upload setup</a>` : ""}</div>${rows ? `<section class="project-table"><div class="project-table-head"><span>Project</span><span>Default branch</span><span></span></div>${rows}</section>` : empty}`);
 }
 
 async function renderNewProject(routeGeneration) {
@@ -235,7 +251,7 @@ async function settingsAction(control, operation) {
 function runRow(run) {
   const target = run.comparisonId ? `/comparisons/${run.comparisonId}` : `/runs/${run.id}`;
   const status = run.comparisonStatus || run.state;
-  return `<a class="run-row" href="${target}" data-link><div class="run-meta"><strong>${escapeHtml(run.branch)}</strong><small><span class="sha">${escapeHtml(shortSha(run.commitSha))}</span> · ${formatDate(run.createdAt)}</small></div><div>${run.pullRequestNumber ? `PR #${run.pullRequestNumber}` : "Branch run"}</div><span class="pill ${escapeHtml(status)}">${escapeHtml(String(status).replaceAll("_", " "))}</span><div class="counts"><span><b>${run.changedCount ?? 0}</b> changed</span><span><b>${run.addedCount ?? 0}</b> added</span><span><b>${run.removedCount ?? 0}</b> removed</span></div></a>`;
+  return `<a class="run-row" href="${target}" data-link><div class="run-meta"><strong>${escapeHtml(run.branch)}</strong><small><span class="sha">${escapeHtml(shortSha(run.commitSha))}</span> · ${formatDate(run.createdAt)}</small></div><div class="run-source">${run.pullRequestNumber ? `PR #${run.pullRequestNumber}` : "Branch run"}</div><span class="pill ${escapeHtml(status)}">${escapeHtml(String(status).replaceAll("_", " "))}</span><div class="counts"><span><b>${run.changedCount ?? 0}</b> changed</span><span><b>${run.addedCount ?? 0}</b> added</span><span><b>${run.removedCount ?? 0}</b> removed</span></div><span class="row-arrow" aria-hidden="true">→</span></a>`;
 }
 
 async function renderRun(runId, routeGeneration) {
