@@ -3,7 +3,10 @@ export let root;
 const initialState = () => ({
   me: null,
   entries: [],
+  snapshotGroups: [],
   selected: 0,
+  snapshotLocale: null,
+  snapshotDevice: null,
   mode: "overlay",
   zoom: 1,
   swipe: .5,
