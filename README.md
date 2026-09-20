@@ -64,3 +64,7 @@ npx wrangler d1 execute snappydiff-local --local --config apps/api/wrangler.json
 ## Delivery status
 
 Implementation follows the milestones in `PLAN.md`. External-provider validation remains an explicit release gate until disposable WorkOS, GitHub, and Cloudflare resources are supplied; see `docs/provider-validation.md`.
+
+## License
+
+SnappyDiff is released under the MIT License. See `LICENSE` for the full text.

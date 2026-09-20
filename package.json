@@ -1,6 +1,7 @@
 {
   "name": "snappydiff",
   "private": true,
+  "license": "MIT",
   "version": "0.0.0",
   "packageManager": "npm@11.12.1",
   "workspaces": [

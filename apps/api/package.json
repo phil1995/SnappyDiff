@@ -1,6 +1,7 @@
 {
   "name": "@snappydiff/api",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
