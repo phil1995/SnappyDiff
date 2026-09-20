@@ -158,9 +158,13 @@ struct RunIdentity {
     run_key: String,
     commit_sha: String,
     branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     merge_base_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     observed_default_head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pull_request_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pull_request_head_sha: Option<String>,
     expected_shards: Vec<String>,
     trust_class: &'static str,

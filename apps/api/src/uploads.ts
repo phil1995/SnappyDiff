@@ -378,7 +378,7 @@ function validateIdentity(value: RunIdentity | undefined): RunIdentity {
     throw new HttpError(400, "invalid_run_identity", "Commit parent SHAs are invalid");
   }
   if (typeof value.graphComplete !== "boolean") throw new HttpError(400, "invalid_run_identity", "graphComplete must be a boolean");
-  if (value.pullRequestHeadSha !== undefined && !isCommitSha(value.pullRequestHeadSha)) {
+  if (value.pullRequestHeadSha != null && !isCommitSha(value.pullRequestHeadSha)) {
     throw new HttpError(400, "invalid_run_identity", "Pull request head SHA is invalid");
   }
   if (!Array.isArray(value.commitGraph) || value.commitGraph.length > 512) {
@@ -391,7 +391,17 @@ function validateIdentity(value: RunIdentity | undefined): RunIdentity {
     }
     return { sha: node.sha, parentShas: [...new Set(node.parentShas)].sort(), complete: node.complete };
   });
-  return { ...value, expectedShards: [...shards].sort(), parentShas: [...new Set(value.parentShas)].sort(), commitGraph };
+  const normalized: RunIdentity = {
+    ...value,
+    expectedShards: [...shards].sort(),
+    parentShas: [...new Set(value.parentShas)].sort(),
+    commitGraph,
+  };
+  if (value.mergeBaseSha == null) delete normalized.mergeBaseSha;
+  if (value.observedDefaultHeadSha == null) delete normalized.observedDefaultHeadSha;
+  if (value.pullRequestNumber == null) delete normalized.pullRequestNumber;
+  if (value.pullRequestHeadSha == null) delete normalized.pullRequestHeadSha;
+  return normalized;
 }
 
 function enforceRunConstraints(principal: MachinePrincipal, identity: RunIdentity): void {
