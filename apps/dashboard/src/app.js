@@ -1,5 +1,5 @@
 import { configureUploadStep, createKeyStep, findNewProject, oidcUploadWorkflow, waitForUploadStep } from "./upload-setup.js";
-import { disposeViewer, renderComparison, renderRun, selectEntry } from "./comparison-view.js";
+import { disposeViewer, renderComparison, renderRun, selectEntry, selectNextEntry } from "./comparison-view.js";
 import { renderSettings } from "./settings-view.js";
 import { api, escapeHtml, formatDate, header, initializeUI, root, settingsAction, shortSha, state } from "./ui.js";
 
@@ -193,7 +193,7 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (["INPUT", "TEXTAREA"].includes(event.target.tagName)) return;
-  if (["ArrowDown", "j", "J"].includes(event.key)) { event.preventDefault(); selectEntry(state.selected + 1); }
+  if (["ArrowDown", "j", "J"].includes(event.key)) { event.preventDefault(); selectNextEntry(); }
   if (["ArrowUp", "k", "K"].includes(event.key)) { event.preventDefault(); selectEntry(state.selected - 1); }
 });
 addEventListener("popstate", route);

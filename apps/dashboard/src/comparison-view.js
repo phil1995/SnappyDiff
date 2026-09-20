@@ -19,6 +19,7 @@ export async function renderComparison(comparisonId, routeGeneration = state.rou
   }
   state.comparisonId = comparisonId;
   state.entries = payload.entries;
+  state.comparisonNextCursor = payload.nextCursor ?? null;
   state.snapshotGroups = groupSnapshots(state.entries);
   state.selected = Math.min(state.selected, Math.max(0, state.snapshotGroups.length - 1));
   const comparison = payload.comparison;
@@ -48,15 +49,8 @@ function bindComparison(comparisonId, comparison, routeGeneration) {
     const button = event.currentTarget;
     button.disabled = true;
     try {
-      const next = await api(`/api/v1/comparisons/${encodeURIComponent(comparisonId)}?after=${encodeURIComponent(button.dataset.loadMore)}`);
-      if (routeGeneration !== state.routeGeneration || state.comparisonId !== comparisonId) return;
-      state.entries.push(...next.entries);
-      state.snapshotGroups = groupSnapshots(state.entries);
-      root.querySelector("#entries").innerHTML = state.snapshotGroups.map(entryButton).join("");
-      root.querySelector(".change-total").textContent = String(state.snapshotGroups.length);
-      syncEntryNavigation();
-      if (next.nextCursor) { button.dataset.loadMore = next.nextCursor; button.disabled = false; } else button.remove();
-    } catch (error) { button.textContent = error.message; }
+      await loadNextComparisonPage();
+    } catch (error) { button.disabled = false; button.textContent = error.message; }
   });
   root.querySelectorAll("[data-decision]").forEach((button) => button.addEventListener("click", async () => {
     button.disabled = true;
@@ -67,7 +61,7 @@ function bindComparison(comparisonId, comparison, routeGeneration) {
     } catch (error) { button.disabled = false; button.textContent = error.message; }
   }));
   root.querySelector("[data-entry-prev]")?.addEventListener("click", () => selectEntry(state.selected - 1));
-  root.querySelector("[data-entry-next]")?.addEventListener("click", () => selectEntry(state.selected + 1));
+  root.querySelector("[data-entry-next]")?.addEventListener("click", selectNextEntry);
   document.title = `${shortSha(comparison.commitSha)} · SnappyDiff`;
 }
 
@@ -80,6 +74,60 @@ export function selectEntry(index) {
   renderSelected();
 }
 
+export async function selectNextEntry() {
+  const currentKey = state.snapshotGroups[state.selected]?.key;
+  if (state.selected < state.snapshotGroups.length - 1) return selectEntry(state.selected + 1);
+  const button = root.querySelector("[data-entry-next]");
+  if (button) button.textContent = "Loading…";
+  try {
+    while (state.comparisonNextCursor) {
+      await loadNextComparisonPage();
+      const currentIndex = currentKey ? state.snapshotGroups.findIndex((group) => group.key === currentKey) : state.selected;
+      state.selected = Math.max(0, currentIndex);
+      if (state.selected < state.snapshotGroups.length - 1) return selectEntry(state.selected + 1);
+    }
+  } catch (error) {
+    if (button) button.title = error.message;
+    return false;
+  } finally {
+    if (button) button.textContent = "Next →";
+    syncEntryNavigation();
+  }
+}
+
+async function loadNextComparisonPage() {
+  if (!state.comparisonNextCursor) return false;
+  if (state.entriesLoading) return state.entriesLoading;
+  const comparisonId = state.comparisonId;
+  const routeGeneration = state.routeGeneration;
+  const cursor = state.comparisonNextCursor;
+  state.entriesLoading = (async () => {
+    const next = await api(`/api/v1/comparisons/${encodeURIComponent(comparisonId)}?after=${encodeURIComponent(cursor)}`);
+    if (routeGeneration !== state.routeGeneration || state.comparisonId !== comparisonId) return false;
+    state.entries.push(...next.entries);
+    state.comparisonNextCursor = next.nextCursor ?? null;
+    state.snapshotGroups = groupSnapshots(state.entries);
+    refreshEntryList();
+    return true;
+  })();
+  syncEntryNavigation();
+  try { return await state.entriesLoading; }
+  finally { state.entriesLoading = null; syncEntryNavigation(); }
+}
+
+function refreshEntryList() {
+  const entries = root.querySelector("#entries");
+  if (entries) entries.innerHTML = state.snapshotGroups.map(entryButton).join("");
+  const total = root.querySelector(".change-total");
+  if (total) total.textContent = String(state.snapshotGroups.length);
+  const button = root.querySelector("[data-load-more]");
+  if (button && state.comparisonNextCursor) {
+    button.dataset.loadMore = state.comparisonNextCursor;
+    button.disabled = false;
+  } else if (button) button.remove();
+  syncEntryNavigation();
+}
+
 function syncEntryNavigation() {
   const navigation = comparisonNavigation(state.selected, state.snapshotGroups.length);
   state.selected = navigation.selected;
@@ -90,7 +138,7 @@ function syncEntryNavigation() {
   const previous = root.querySelector("[data-entry-prev]");
   const next = root.querySelector("[data-entry-next]");
   if (previous) previous.disabled = navigation.previousDisabled;
-  if (next) next.disabled = navigation.nextDisabled;
+  if (next) next.disabled = Boolean(state.entriesLoading) || (navigation.nextDisabled && !state.comparisonNextCursor);
 }
 
 function imageUrl(id) { return id ? `/api/v1/images/${encodeURIComponent(id)}/content` : null; }

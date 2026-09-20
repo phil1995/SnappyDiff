@@ -7,6 +7,8 @@ const initialState = () => ({
   selected: 0,
   snapshotLocale: null,
   snapshotDevice: null,
+  comparisonNextCursor: null,
+  entriesLoading: null,
   mode: "overlay",
   zoom: 1,
   swipe: .5,
