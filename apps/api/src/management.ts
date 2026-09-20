@@ -1,6 +1,7 @@
 import type { Session } from "./auth.ts";
+import { auditStatement, recordAudit } from "./audit.ts";
 import { requirePermission } from "./authorization.ts";
-import { randomId, sha256 } from "./crypto.ts";
+import { base64Url, randomId, sha256 } from "./crypto.ts";
 import { isAncestor } from "./baselines.ts";
 import { HttpError, json, readJson, type RequestContext } from "./http.ts";
 import type { D1PreparedStatement, Env } from "./platform.ts";
@@ -53,8 +54,9 @@ export async function updateProjectSettings(request: Request, env: Env, session:
   `).bind(name ?? null, defaultBranch ?? null, retentionDays ?? null, promotedRetentionDays ?? null,
     projectId, session.organizationId).run();
   if (Number(update.meta?.["changes"] ?? 0) !== 1) throw new HttpError(404, "project_not_found", "Project was not found");
-  await audit(env, session, context, "project.settings_updated", "project", projectId,
-    { name, defaultBranch, retentionDays, promotedRetentionDays });
+  await recordAudit(env, { organizationId: session.organizationId, actorUserId: session.userId,
+    action: "project.settings_updated", targetType: "project", targetId: projectId, requestId: context.requestId,
+    metadata: { name, defaultBranch, retentionDays, promotedRetentionDays } });
   return json({ updated: true });
 }
 
@@ -177,7 +179,9 @@ export async function controlBaseline(request: Request, env: Env, session: Sessi
     const results = await env.DB.batch(statements);
     if (Number(results[0]?.meta?.["changes"] ?? 0) !== 1) throw new HttpError(409, "baseline_changed", "Baseline state changed; refresh and retry");
   }
-  await audit(env, session, context, `baseline.${action}`, "project", projectId, { runId: body.runId ?? null });
+  await recordAudit(env, { organizationId: session.organizationId, actorUserId: session.userId,
+    action: `baseline.${action}`, targetType: "project", targetId: projectId, requestId: context.requestId,
+    metadata: { runId: body.runId ?? null } });
   return json({ action, updated: true });
 }
 
@@ -210,7 +214,9 @@ export async function updateMember(request: Request, env: Env, session: Session,
     if (!exists) throw new HttpError(404, "member_not_found", "Member was not found");
     throw new HttpError(409, "last_admin", "The final active administrator cannot be suspended or demoted");
   }
-  await audit(env, session, context, "membership.updated", "user", userId, { role, status });
+  await recordAudit(env, { organizationId: session.organizationId, actorUserId: session.userId,
+    action: "membership.updated", targetType: "user", targetId: userId, requestId: context.requestId,
+    metadata: { role, status } });
   return json({ updated: true });
 }
 
@@ -233,7 +239,9 @@ export async function createWorkspaceToken(request: Request, env: Env, session: 
   const expiresInDays = body.expiresInDays === undefined ? 365 : optionalInteger(body.expiresInDays, "expiresInDays", 1, 365)!;
   const scopes = ["runs:create", "projects:bootstrap"];
   const created = await tokenRecord(env, session, null, name, scopes, expiresInDays);
-  await audit(env, session, context, "workspace_token.created", "api_token", created.id, { scopes, expiresInDays });
+  await recordAudit(env, { organizationId: session.organizationId, actorUserId: session.userId,
+    action: "workspace_token.created", targetType: "api_token", targetId: created.id, requestId: context.requestId,
+    metadata: { scopes, expiresInDays } });
   return json({ token: created.raw, record: { id: created.id, name, tokenPrefix: created.prefix, scopes,
     expiresAt: created.expiresAt } }, { status: 201 });
 }
@@ -243,7 +251,8 @@ export async function revokeToken(env: Env, session: Session, tokenId: string, c
   const result = await env.DB.prepare("UPDATE api_tokens SET revoked_at = COALESCE(revoked_at, unixepoch()) WHERE id = ? AND organization_id = ?")
     .bind(tokenId, session.organizationId).run();
   if (Number(result.meta?.["changes"] ?? 0) !== 1) throw new HttpError(404, "token_not_found", "Token was not found");
-  await audit(env, session, context, "token.revoked", "api_token", tokenId, {});
+  await recordAudit(env, { organizationId: session.organizationId, actorUserId: session.userId,
+    action: "token.revoked", targetType: "api_token", targetId: tokenId, requestId: context.requestId });
   return new Response(null, { status: 204 });
 }
 
@@ -266,13 +275,12 @@ export async function rotateToken(request: Request, env: Env, session: Session, 
       old.scopes_json, created.expiresAt, session.userId, tokenId, session.organizationId),
     env.DB.prepare("UPDATE api_tokens SET revoked_at = unixepoch() WHERE id = ? AND organization_id = ? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM api_tokens WHERE id = ? AND organization_id = ?)")
       .bind(tokenId, session.organizationId, created.id, session.organizationId),
-    env.DB.prepare(`INSERT INTO audit_events
-      (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
-      SELECT ?, ?, ?, 'token.rotated', 'api_token', ?, ?, ? WHERE EXISTS (
-        SELECT 1 FROM api_tokens WHERE id = ? AND organization_id = ?
-      )
-    `).bind(randomId("aud"), session.organizationId, session.userId, created.id, context.requestId,
-      JSON.stringify({ previousTokenId: tokenId }), created.id, session.organizationId),
+    auditStatement(env, { organizationId: session.organizationId, actorUserId: session.userId,
+      action: "token.rotated", targetType: "api_token", targetId: created.id, requestId: context.requestId,
+      metadata: { previousTokenId: tokenId } }, {
+      sql: "EXISTS (SELECT 1 FROM api_tokens WHERE id = ? AND organization_id = ?)",
+      bindings: [created.id, session.organizationId],
+    }),
   ]);
   if (Number(results[0]?.meta?.["changes"] ?? 0) !== 1) throw new HttpError(409, "token_already_rotated", "Token was already revoked or rotated");
   return json({ token: created.raw, record: { id: created.id, name: old.name, tokenPrefix: created.prefix, scopes: JSON.parse(old.scopes_json), expiresAt: created.expiresAt } }, { status: 201 });
@@ -286,8 +294,7 @@ async function tokenRecord(env: Env, session: Session, projectId: string | null,
 
 async function buildToken(env: Env, session: Session, projectId: string | null, name: string, scopes: string[], expiresInDays: number) {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
-  let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
-  const raw = `sd_pat_${btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
+  const raw = `sd_pat_${base64Url(bytes)}`;
   const id = randomId("tok");
   const prefix = raw.slice(0, 14);
   const expiresAt = Math.floor(Date.now() / 1000) + expiresInDays * 86400;
@@ -297,17 +304,6 @@ async function buildToken(env: Env, session: Session, projectId: string | null, 
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(id, session.organizationId, projectId, name, prefix, hash, JSON.stringify(scopes), expiresAt, session.userId);
   return { id, raw, prefix, expiresAt, hash, statement };
-}
-
-async function audit(env: Env, session: Session, context: RequestContext, action: string, targetType: string, targetId: string, metadata: unknown): Promise<void> {
-  await auditStatement(env, session, context, action, targetType, targetId, metadata).run();
-}
-
-function auditStatement(env: Env, session: Session, context: RequestContext, action: string, targetType: string, targetId: string, metadata: unknown): D1PreparedStatement {
-  return env.DB.prepare(`INSERT INTO audit_events
-    (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(randomId("aud"), session.organizationId, session.userId, action, targetType, targetId, context.requestId, JSON.stringify(metadata));
 }
 
 function requiredString(value: unknown, field: string, maximum: number): string {

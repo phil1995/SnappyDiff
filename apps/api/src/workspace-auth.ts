@@ -1,4 +1,5 @@
 import { randomId, signJson } from "./crypto.ts";
+import { recordAudit } from "./audit.ts";
 import { HttpError, json, readJson } from "./http.ts";
 import { requireWorkspacePrincipal, type WorkspaceMachineGrant } from "./machine-auth.ts";
 import type { Env } from "./platform.ts";
@@ -20,11 +21,9 @@ export async function exchangeWorkspaceKey(request: Request, env: Env): Promise<
     ...(body.defaultBranch === undefined ? {} : { defaultBranch: body.defaultBranch }),
   });
   if (project.created) {
-    await env.DB.prepare(`INSERT INTO audit_events
-      (id, organization_id, actor_token_id, action, target_type, target_id, request_id, metadata_json)
-      VALUES (?, ?, ?, 'project.created_from_upload', 'project', ?, ?, ?)`)
-      .bind(randomId("aud"), principal.organizationId, principal.tokenId, project.id, randomId("req"),
-        JSON.stringify({ repository: `${project.repositoryOwner}/${project.repositoryName}` })).run();
+    await recordAudit(env, { organizationId: principal.organizationId, actorTokenId: principal.tokenId,
+      action: "project.created_from_upload", targetType: "project", targetId: project.id, requestId: randomId("req"),
+      metadata: { repository: `${project.repositoryOwner}/${project.repositoryName}` } });
   }
   const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
   const grant: WorkspaceMachineGrant = {

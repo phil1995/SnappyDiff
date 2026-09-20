@@ -1,0 +1,31 @@
+import { api, escapeHtml, formatDate, header, root, settingsAction, shortSha, state } from "./ui.js";
+
+export async function renderSettings(projectId, routeGeneration) {
+  const admin = state.me.user.role === "admin";
+  const [operations, memberPayload] = await Promise.all([
+    api(`/api/v1/projects/${encodeURIComponent(projectId)}/settings`),
+    admin ? api("/api/v1/members") : Promise.resolve({ members: [] }),
+  ]);
+  if (routeGeneration !== state.routeGeneration) return;
+  const project = operations.project;
+  const warningHtml = operations.retentionWarnings.map((warning) => `<div class="warning">PR #${warning.number} retention is preserved because GitHub state could not be reconciled. ${escapeHtml(warning.reconciliationError || "")}</div>`).join("");
+  const history = operations.baselineHistory.map((item) => `<div class="history-row"><span class="pill">${escapeHtml(item.action)}</span><span class="sha">${escapeHtml(shortSha(item.commitSha))}</span><span>${escapeHtml(item.actorEmail || "automation")}</span><time>${formatDate(item.createdAt)}</time></div>`).join("");
+  const members = memberPayload.members.map((member) => `<div class="management-row"><div><strong>${escapeHtml(member.email)}</strong><small>${escapeHtml(member.displayName)}</small></div><div><select data-member-role="${escapeHtml(member.id)}"><option ${member.role === "viewer" ? "selected" : ""}>viewer</option><option ${member.role === "reviewer" ? "selected" : ""}>reviewer</option><option ${member.role === "admin" ? "selected" : ""}>admin</option></select> <select data-member-status="${escapeHtml(member.id)}"><option ${member.status === "active" ? "selected" : ""}>active</option><option ${member.status === "suspended" ? "selected" : ""}>suspended</option></select></div></div>`).join("");
+  const githubRepositories = admin ? `<section class="settings-card"><h2>GitHub repositories</h2><p class="muted">Authorize repository changes after updating the GitHub App installation.</p><button class="button" data-github-connect>Sync GitHub repositories</button></section>` : "";
+  const memberSettings = admin ? `<section class="settings-card wide"><h2>Members</h2>${members}</section>` : "";
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(projectId)}" data-link>${escapeHtml(project.name)}</a><span>/</span><span>Settings</span></nav><span class="eyebrow">Operations</span><h1>${escapeHtml(project.name)}</h1>${warningHtml}<div class="settings-grid"><section class="settings-card"><h2>Project</h2><form data-project-settings><label>Name<input name="name" value="${escapeHtml(project.name)}" required maxlength="100"></label><label>Default branch<input name="defaultBranch" value="${escapeHtml(project.defaultBranch)}" required maxlength="255"></label><div class="field-pair"><label>Artifact days<input name="retentionDays" type="number" min="1" max="3650" value="${project.retentionDays}"></label><label>Promoted days<input name="promotedRetentionDays" type="number" min="365" max="3650" value="${project.promotedRetentionDays}"></label></div><button class="button primary" ${admin ? "" : "disabled"}>Save settings</button></form></section><section class="settings-card"><h2>Baseline control</h2><p class="muted">Active <span class="sha">${escapeHtml(shortSha(project.activeBaselineSha) || "none")}</span> · mode ${escapeHtml(project.promotionMode)}${project.rollbackSha ? ` · rollback ${escapeHtml(shortSha(project.rollbackSha))}` : ""}</p><div class="decision"><button class="button" data-baseline-action="pause" ${admin ? "" : "disabled"}>Pause</button><button class="button primary" data-baseline-action="resume" ${admin ? "" : "disabled"}>Resume</button><button class="button" data-baseline-action="clear_rollback" ${admin ? "" : "disabled"}>Clear rollback</button></div><label>Run ID for rollback or history reset<input data-baseline-run placeholder="run_…" ${admin ? "" : "disabled"}></label><div class="decision"><button class="button" data-baseline-action="rollback" ${admin ? "" : "disabled"}>Rollback view</button><button class="button danger" data-baseline-action="history_reset" ${admin ? "" : "disabled"}>Confirm history reset</button></div></section><section class="settings-card wide"><h2>Baseline history</h2>${history || `<div class="empty">No baseline history yet.</div>`}</section>${githubRepositories}${memberSettings}</div>`);
+  bindSettings(projectId, routeGeneration);
+}
+
+function bindSettings(projectId, routeGeneration) {
+  root.querySelector("[data-project-settings]")?.addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    await settingsAction(event.submitter, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/settings`, { method: "PATCH", body: JSON.stringify({ name: form.get("name"), defaultBranch: form.get("defaultBranch"), retentionDays: Number(form.get("retentionDays")), promotedRetentionDays: Number(form.get("promotedRetentionDays")) }) }));
+  });
+  root.querySelectorAll("[data-baseline-action]").forEach((button) => button.onclick = async () => {
+    await settingsAction(button, () => api(`/api/v1/projects/${encodeURIComponent(projectId)}/baseline-control`, { method: "POST", body: JSON.stringify({ action: button.dataset.baselineAction, runId: root.querySelector("[data-baseline-run]").value || undefined }) }));
+    if (routeGeneration === state.routeGeneration) await renderSettings(projectId, routeGeneration);
+  });
+  root.querySelectorAll("[data-member-role], [data-member-status]").forEach((select) => select.onchange = async () => { const userId = select.dataset.memberRole || select.dataset.memberStatus; const role = root.querySelector(`[data-member-role="${CSS.escape(userId)}"]`).value; const status = root.querySelector(`[data-member-status="${CSS.escape(userId)}"]`).value; await settingsAction(select, () => api(`/api/v1/members/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ role, status }) })); });
+  root.querySelector("[data-github-connect]")?.addEventListener("click", async (event) => { const result = await settingsAction(event.currentTarget, () => api("/api/v1/github/installations/authorize", { method: "POST", body: "{}" })); if (result) location.assign(result.installationUrl); });
+}

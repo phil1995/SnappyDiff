@@ -21,15 +21,3 @@ export async function enforceRateLimit(
   }
 }
 
-export async function reserveUploadBytes(env: Env, organizationId: string, bytes: number): Promise<void> {
-  if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new HttpError(400, "invalid_reservation", "Reservation bytes must be a positive integer");
-  const result = await env.DB.prepare(`
-    UPDATE organization_usage
-       SET reserved_upload_bytes = reserved_upload_bytes + ?, updated_at = unixepoch()
-     WHERE organization_id = ?
-       AND stored_bytes + reserved_upload_bytes + ? <= upload_budget_bytes
-  `).bind(bytes, organizationId, bytes).run();
-  const changed = Number(result.meta?.["changes"] ?? 0);
-  if (changed !== 1) throw new HttpError(429, "upload_budget_exceeded", "Organization upload budget is exhausted");
-}
-

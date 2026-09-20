@@ -1,6 +1,6 @@
 import { LIMITS, isSha256, normalizeScreenshotName, type RunIdentity, type ScreenshotManifestEntry } from "@snappydiff/contracts";
 import { randomId, sha256 } from "./crypto.ts";
-import { HttpError, json, readJson, type RequestContext } from "./http.ts";
+import { HttpError, json, readJson } from "./http.ts";
 import { enqueueJob } from "./jobs.ts";
 import type { MachinePrincipal } from "./machine-auth.ts";
 import type { D1PreparedStatement, Env } from "./platform.ts";
@@ -113,7 +113,9 @@ export async function submitManifestPage(
   const totalPages = integer(body.totalPages, "totalPages", 1, 2500);
   if (page >= totalPages) throw new HttpError(400, "invalid_page", "Page number must be less than totalPages");
   const idempotencyKey = requiredIdentifier(body.idempotencyKey, "idempotencyKey", 200);
-  if (!Array.isArray(body.entries) || body.entries.length > 100) throw new HttpError(400, "invalid_manifest", "A manifest page must contain at most 100 entries");
+  if (!Array.isArray(body.entries) || body.entries.length > LIMITS.manifestPageEntries) {
+    throw new HttpError(400, "invalid_manifest", `A manifest page must contain at most ${LIMITS.manifestPageEntries} entries`);
+  }
   const entries = body.entries.map(validateEntry);
   const canonical = JSON.stringify(entries);
   const digest = await sha256(canonical);

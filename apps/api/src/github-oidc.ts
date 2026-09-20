@@ -1,4 +1,5 @@
-import { randomId, signJson } from "./crypto.ts";
+import { fromBase64Url, randomId, signJson } from "./crypto.ts";
+import { recordAudit } from "./audit.ts";
 import { classifyPullRequestFork, githubRequest } from "./github.ts";
 import { HttpError, json, readJson } from "./http.ts";
 import type { Env } from "./platform.ts";
@@ -29,14 +30,6 @@ interface InstalledRepository { id: number; name: string; default_branch: string
 
 const cachedKeys = new Map<string, { key: CryptoKey; expiresAt: number }>();
 
-function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
-  const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-  return bytes;
-}
-
 async function githubSigningKey(kid: string): Promise<CryptoKey> {
   const cached = cachedKeys.get(kid);
   if (cached && cached.expiresAt > Date.now()) return cached.key;
@@ -59,14 +52,14 @@ export async function verifyGitHubOidc(token: string, audience: string, now = Ma
   let header: { alg?: string; kid?: string };
   let claims: GitHubClaims;
   try {
-    header = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[0]))) as { alg?: string; kid?: string };
-    claims = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[1]))) as GitHubClaims;
+    header = JSON.parse(new TextDecoder().decode(fromBase64Url(parts[0]))) as { alg?: string; kid?: string };
+    claims = JSON.parse(new TextDecoder().decode(fromBase64Url(parts[1]))) as GitHubClaims;
   } catch {
     throw new HttpError(401, "invalid_oidc_token", "OIDC token payload is invalid");
   }
   if (header.alg !== "RS256" || !header.kid) throw new HttpError(401, "invalid_oidc_token", "OIDC signing algorithm is invalid");
   const key = await githubSigningKey(header.kid);
-  const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, decodeBase64Url(parts[2]), new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
+  const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, fromBase64Url(parts[2]), new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   if (!valid || claims.iss !== "https://token.actions.githubusercontent.com" || !audiences.includes(audience)
     || typeof claims.exp !== "number" || claims.exp < now || (claims.nbf !== undefined && claims.nbf > now + 30)
@@ -176,11 +169,9 @@ async function resolveOidcProject(
     githubRepositoryId: repository.id,
   });
   if (project.created) {
-    await env.DB.prepare(`INSERT INTO audit_events
-      (id, organization_id, action, target_type, target_id, request_id, metadata_json)
-      VALUES (?, ?, 'project.created_from_oidc', 'project', ?, ?, ?)`)
-      .bind(randomId("aud"), installation.organization_id, project.id, randomId("req"),
-        JSON.stringify({ repository: `${project.repositoryOwner}/${project.repositoryName}` })).run();
+    await recordAudit(env, { organizationId: installation.organization_id,
+      action: "project.created_from_oidc", targetType: "project", targetId: project.id, requestId: randomId("req"),
+      metadata: { repository: `${project.repositoryOwner}/${project.repositoryName}` } });
   }
   await env.DB.prepare(`INSERT INTO github_installations
     (id, organization_id, installation_id, account_login, repository_owner, repository_name)

@@ -1,10 +1,9 @@
 import { AwsClient } from "aws4fetch";
+import { LIMITS } from "@snappydiff/contracts";
 import { signJson, verifyJson } from "./crypto.ts";
 import { HttpError, json, readBytes } from "./http.ts";
 import type { Env } from "./platform.ts";
 import { requireOrganizationWritable } from "./privacy.ts";
-
-const FIFTEEN_MINUTES = 15 * 60;
 
 interface LocalUploadGrant {
   sessionId: string;
@@ -25,7 +24,7 @@ export async function createUploadTarget(
   env: Env,
   session: { id: string; organizationId: string; temporaryKey: string; expectedBytes: number },
 ): Promise<UploadTarget> {
-  const expiresAt = Math.floor(Date.now() / 1000) + FIFTEEN_MINUTES;
+  const expiresAt = Math.floor(Date.now() / 1000) + LIMITS.uploadUrlSeconds;
   if (env.APP_ENV === "local") {
     if (!env.TOKEN_PEPPER || env.TOKEN_PEPPER.length < 32) throw new HttpError(503, "uploads_not_configured", "Local upload signing is not configured");
     const token = await signJson<LocalUploadGrant>({
@@ -49,7 +48,7 @@ export async function createUploadTarget(
     region: "auto",
   });
   const objectUrl = new URL(`https://${env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET_NAME}/${session.temporaryKey}`);
-  objectUrl.searchParams.set("X-Amz-Expires", String(FIFTEEN_MINUTES));
+  objectUrl.searchParams.set("X-Amz-Expires", String(LIMITS.uploadUrlSeconds));
   const signed = await client.sign(objectUrl, {
     method: "PUT",
     headers: { "content-type": "image/png", "content-length": String(session.expectedBytes) },

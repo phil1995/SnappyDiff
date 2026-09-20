@@ -10,6 +10,7 @@ The repository is deliberately safe to clone without credentials. Provider integ
 - `apps/dashboard`: authenticated review frontend.
 - `cli`: Rust command-line client.
 - `packages/contracts`: shared HTTP schemas and limits.
+- `shared/limits.json`: upload limits consumed by the API and compiled into the CLI.
 - `docs`: architecture, security, operations, and provider validation records.
 - `infra`: checked-in deployment templates with placeholder resource identifiers.
 
@@ -20,6 +21,7 @@ Prerequisites are Node.js 22+, npm 11+, Rust 1.85+, and Wrangler 4+. Rust is onl
 For dashboard and Worker development, install dependencies and run:
 
 ```bash
+npm ci
 npm run dev
 ```
 
@@ -30,14 +32,16 @@ The local shortcut is gated by `APP_ENV=local` and is unavailable in staging and
 If an older checkout left incompatible emulator data behind, `npm run dev:reset` rebuilds only the
 ignored local Wrangler state and then starts the same development server.
 
+Run the local configuration shape check and code checks separately:
+
 ```bash
-npm install
-mkdir -p apps/api
-cp .env.example apps/api/.dev.vars
-npm run validate:config -- apps/api/.dev.vars
+npm run validate:config -- .env.example
 npm run check
 npm test
 ```
+
+`npm run dev` creates `apps/api/.dev.vars` with local signing secrets when it does not exist.
+Keep that file private and preserve its generated values when adding local overrides.
 
 Local D1 and R2 emulation use Wrangler and do not require cloud credentials. See `docs/deployment.md` before creating remote resources or secrets.
 

@@ -1,4 +1,5 @@
-import { randomId, timingSafeEqual } from "./crypto.ts";
+import { timingSafeEqual } from "./crypto.ts";
+import { auditStatement } from "./audit.ts";
 import { HttpError, json, readBytes } from "./http.ts";
 import type { Env } from "./platform.ts";
 
@@ -69,13 +70,10 @@ export async function handleWorkOSWebhook(request: Request, env: Env, requestId:
       UPDATE memberships SET status = ?, role = COALESCE(?, role), updated_at = unixepoch()
       WHERE organization_id = ? AND user_id = ?
     `).bind(status, role, organization.id, user.id),
-    env.DB.prepare(`
-      INSERT INTO audit_events
-        (id, organization_id, action, target_type, target_id, request_id, metadata_json)
-      VALUES (?, ?, 'membership.synced', 'membership', ?, ?, ?)
-    `).bind(randomId("aud"), organization.id, user.id, requestId, JSON.stringify({ workosEventId: event.id, event: event.event, status, role })),
+    auditStatement(env, { organizationId: organization.id, action: "membership.synced",
+      targetType: "membership", targetId: user.id, requestId,
+      metadata: { workosEventId: event.id, event: event.event, status, role } }),
   ];
   await env.DB.batch(statements);
   return json({ received: true });
 }
-

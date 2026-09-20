@@ -47,19 +47,9 @@ run(wrangler.command, [...wrangler.args, "d1", "execute", "snappydiff-local", "-
 buildDashboard();
 
 let rebuildTimer;
-let rebuilding = false;
-let rebuildAgain = false;
 const dashboardWatcher = watch(join(dashboard, "src"), { recursive: true }, () => {
   clearTimeout(rebuildTimer);
-  rebuildTimer = setTimeout(() => {
-    if (rebuilding) { rebuildAgain = true; return; }
-    rebuilding = true;
-    do {
-      rebuildAgain = false;
-      buildDashboard();
-    } while (rebuildAgain);
-    rebuilding = false;
-  }, 75);
+  rebuildTimer = setTimeout(buildDashboard, 75);
 });
 
 const worker = spawn(wrangler.command, [...wrangler.args, "dev", "--config", "apps/api/wrangler.jsonc"], { cwd: root, stdio: "inherit" });

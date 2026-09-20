@@ -1,3 +1,4 @@
+import { LIMITS } from "@snappydiff/contracts";
 import { randomId, sha256 } from "./crypto.ts";
 import type { PendingJob } from "./jobs.ts";
 import type { Env } from "./platform.ts";
@@ -316,7 +317,8 @@ export function parsePngDimensions(bytes: Uint8Array): { width: number; height: 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const width = view.getUint32(16);
   const height = view.getUint32(20);
-  if (width < 1 || height < 1 || width > 16_384 || height > 16_384 || width * height > 40_000_000) {
+  if (width < 1 || height < 1 || width > LIMITS.imageAxisPixels || height > LIMITS.imageAxisPixels
+    || width * height > LIMITS.decodedImagePixels) {
     throw new Error("PNG dimensions exceed configured limits");
   }
   return { width, height };

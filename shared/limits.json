@@ -1,0 +1,12 @@
+{
+  "compressedImageBytes": 33554432,
+  "imageAxisPixels": 16384,
+  "decodedImagePixels": 40000000,
+  "screenshotsPerRun": 10000,
+  "logicalRunBytes": 2147483648,
+  "manifestPageBytes": 4194304,
+  "manifestPageEntries": 100,
+  "uploadUrlSeconds": 900,
+  "unfinishedRunSeconds": 86400,
+  "temporaryObjectSeconds": 86400
+}

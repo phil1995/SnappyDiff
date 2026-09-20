@@ -198,7 +198,6 @@ export default {
       level: "info", requestId: context.requestId, method: request.method,
       path: new URL(request.url).pathname, status: response.status, durationMs: Date.now() - context.startedAt,
     }));
-    execution.waitUntil(Promise.resolve());
     return secure(withRequestId(response, context), env);
   },
 

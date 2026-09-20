@@ -1,4 +1,5 @@
 import type { Session } from "./auth.ts";
+import { auditStatement } from "./audit.ts";
 import { requirePermission } from "./authorization.ts";
 import { randomId } from "./crypto.ts";
 import { HttpError, json, readJson, type RequestContext } from "./http.ts";
@@ -55,10 +56,9 @@ export async function decideComparison(
       UPDATE comparisons SET status = ?, decision_note = ?, reviewed_by_user_id = ?, reviewed_at = unixepoch()
        WHERE id = ? AND organization_id = ? AND status = 'action_required'
     `).bind(body.decision, note, session.userId, comparisonId, session.organizationId),
-    env.DB.prepare(`
-      INSERT INTO audit_events (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
-      VALUES (?, ?, ?, ?, 'comparison', ?, ?, ?)
-    `).bind(randomId("aud"), session.organizationId, session.userId, `report.${body.decision}`, comparisonId, context.requestId, JSON.stringify({ note })),
+    auditStatement(env, { organizationId: session.organizationId, actorUserId: session.userId,
+      action: `report.${body.decision}`, targetType: "comparison", targetId: comparisonId,
+      requestId: context.requestId, metadata: { note } }),
   ];
   if (check) {
     const version = check.desired_version + 1;

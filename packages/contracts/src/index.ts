@@ -1,14 +1,6 @@
-export const LIMITS = Object.freeze({
-  compressedImageBytes: 32 * 1024 * 1024,
-  imageAxisPixels: 16_384,
-  decodedImagePixels: 40_000_000,
-  screenshotsPerRun: 10_000,
-  logicalRunBytes: 2 * 1024 * 1024 * 1024,
-  manifestPageBytes: 4 * 1024 * 1024,
-  uploadUrlSeconds: 15 * 60,
-  unfinishedRunSeconds: 24 * 60 * 60,
-  temporaryObjectSeconds: 24 * 60 * 60,
-});
+import limits from "../../../shared/limits.json" with { type: "json" };
+
+export const LIMITS = Object.freeze(limits);
 
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };

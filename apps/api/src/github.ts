@@ -1,4 +1,5 @@
-import { randomId, signJson, timingSafeEqual, verifyJson } from "./crypto.ts";
+import { base64Url, randomId, signJson, timingSafeEqual, verifyJson } from "./crypto.ts";
+import { auditStatement } from "./audit.ts";
 import { requirePermission } from "./authorization.ts";
 import type { Session } from "./auth.ts";
 import { HttpError, json, readBytes, readJson, type RequestContext } from "./http.ts";
@@ -120,12 +121,6 @@ export async function ensureInProgressGitHubCheck(
     VALUES (?, ?, 'deliver_github_check', ?, ?) ON CONFLICT (organization_id, deduplication_key) DO NOTHING
   `).bind(randomId("job"), organizationId, `github:${check.id}:${check.desired_version}`,
     JSON.stringify({ checkId: check.id })).run();
-}
-
-function base64Url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
 async function appJwt(env: Env): Promise<string> {
@@ -296,11 +291,9 @@ export async function completeGitHubOnboarding(
       DO UPDATE SET account_login = excluded.account_login, suspended_at = NULL, updated_at = unixepoch()
     `).bind(randomId("ghi"), session.organizationId, Number(installationId), repository.owner.login, repository.owner.login, repository.name));
   }
-  statements.push(env.DB.prepare(`
-    INSERT INTO audit_events (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
-    VALUES (?, ?, ?, 'github.installation_synced', 'github_installation', ?, ?, ?)
-  `).bind(randomId("aud"), session.organizationId, session.userId, String(installationId), context.requestId,
-    JSON.stringify({ repositoryCount: repositories.length })));
+  statements.push(auditStatement(env, { organizationId: session.organizationId, actorUserId: session.userId,
+    action: "github.installation_synced", targetType: "github_installation", targetId: String(installationId),
+    requestId: context.requestId, metadata: { repositoryCount: repositories.length } }));
   try { await env.DB.batch(statements); }
   catch (error) {
     if (String(error).includes("github_installation_already_linked")) {
@@ -605,10 +598,9 @@ export async function linkGitHubInstallation(
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (organization_id, installation_id, repository_owner, repository_name)
       DO UPDATE SET suspended_at = NULL, updated_at = unixepoch()
     `).bind(randomId("ghi"), session.organizationId, installationId, project.repository_owner, project.repository_owner, project.repository_name),
-    env.DB.prepare(`
-      INSERT INTO audit_events (id, organization_id, actor_user_id, action, target_type, target_id, request_id, metadata_json)
-      VALUES (?, ?, ?, 'github.installation_linked', 'project', ?, ?, ?)
-    `).bind(randomId("aud"), session.organizationId, session.userId, projectId, context.requestId, JSON.stringify({ installationId })),
+    auditStatement(env, { organizationId: session.organizationId, actorUserId: session.userId,
+      action: "github.installation_linked", targetType: "project", targetId: projectId,
+      requestId: context.requestId, metadata: { installationId } }),
     ]);
   } catch (error) {
     if (String(error).includes("github_installation_already_linked")) {

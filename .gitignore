@@ -3,10 +3,12 @@
 .env.*
 !.env.example
 .dev.vars
+.dev.vars.*
+wrangler.local.jsonc
+wrangler.*.local.jsonc
 .wrangler/
 node_modules/
 dist/
 coverage/
 target/
 *.log
-

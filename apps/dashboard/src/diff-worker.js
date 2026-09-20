@@ -1,12 +1,16 @@
 self.onmessage = async (event) => {
   const { requestId, baseline, current } = event.data;
+  let before;
+  let after;
+  let bitmap;
   try {
     const [beforeResponse, afterResponse] = await Promise.all([
       fetch(baseline, { credentials: "same-origin", cache: "no-store" }),
       fetch(current, { credentials: "same-origin", cache: "no-store" }),
     ]);
     if (!beforeResponse.ok || !afterResponse.ok) throw new Error("A private screenshot could not be loaded.");
-    const [before, after] = await Promise.all([createImageBitmap(await beforeResponse.blob()), createImageBitmap(await afterResponse.blob())]);
+    before = await createImageBitmap(await beforeResponse.blob());
+    after = await createImageBitmap(await afterResponse.blob());
     if (before.width !== after.width || before.height !== after.height) {
       throw new Error(`Dimension mismatch: baseline is ${before.width}×${before.height}, current is ${after.width}×${after.height}.`);
     }
@@ -25,10 +29,13 @@ self.onmessage = async (event) => {
       else { pixels[index] = Math.round(pixels[index] * .22); pixels[index + 1] = Math.round(pixels[index + 1] * .22); pixels[index + 2] = Math.round(pixels[index + 2] * .22); pixels[index + 3] = 255; }
     }
     context.putImageData(output, 0, 0);
-    const bitmap = canvas.transferToImageBitmap();
+    bitmap = canvas.transferToImageBitmap();
     self.postMessage({ requestId, bitmap }, [bitmap]);
-    before.close(); after.close();
   } catch (error) {
     self.postMessage({ requestId, error: error instanceof Error ? error.message : "Visual diff failed." });
+  } finally {
+    before?.close();
+    after?.close();
+    bitmap?.close();
   }
 };
