@@ -81,3 +81,67 @@ ON CONFLICT (organization_id, comparison_id, name) DO UPDATE SET
   kind = excluded.kind,
   baseline_image_id = excluded.baseline_image_id,
   current_image_id = excluded.current_image_id;
+
+-- Localized variants for the Screens view. Names follow the <screen>.<locale>-<device>.png convention.
+WITH
+  screens(slug, screen) AS (VALUES ('welcome', 'Onboarding/Welcome'), ('account', 'Settings/Account'), ('summary', 'Checkout/Summary')),
+  locales(locale) AS (VALUES ('en'), ('de'), ('fr'), ('ja')),
+  devices(device, width, height) AS (VALUES ('iPhone15', 393, 852), ('iPadPro11', 834, 1194))
+INSERT OR IGNORE INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
+SELECT 'img_local_l10n_' || slug || '_' || locale || '_' || device, 'org_local',
+  substr(lower(hex(slug || '|' || locale || '|' || device)) || '0000000000000000000000000000000000000000000000000000000000000000', 1, 64),
+  'local-fixture/l10n/' || slug || '/' || locale || '/' || device || '.png', 'image/png', 1, width, height
+  FROM screens, locales, devices;
+
+WITH
+  screens(slug, screen) AS (VALUES ('welcome', 'Onboarding/Welcome'), ('account', 'Settings/Account'), ('summary', 'Checkout/Summary')),
+  locales(locale) AS (VALUES ('en'), ('de'), ('fr'), ('ja')),
+  devices(device) AS (VALUES ('iPhone15'), ('iPadPro11'))
+INSERT OR IGNORE INTO screenshots (organization_id, run_id, shard_id, name, image_id)
+SELECT 'org_local', 'run_local_baseline', 'shd_local_baseline', screen || '.' || locale || '-' || device || '.png',
+  'img_local_l10n_' || slug || '_' || locale || '_' || device
+  FROM screens, locales, devices;
+
+UPDATE runs SET screenshot_count = (
+  SELECT COUNT(*) FROM screenshots WHERE organization_id = 'org_local' AND run_id = 'run_local_baseline'
+) WHERE id = 'run_local_baseline' AND organization_id = 'org_local';
+
+-- The feature branch shortens the German and French welcome copy, so the demo comparison has localized variants.
+WITH
+  locales(locale) AS (VALUES ('de'), ('fr')),
+  devices(device, width, height) AS (VALUES ('iPhone15', 393, 852), ('iPadPro11', 834, 1194))
+INSERT OR IGNORE INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
+SELECT 'img_local_l10n_welcome_' || locale || '_' || device || '_shortened', 'org_local',
+  substr(lower(hex('short|' || locale || '|' || device)) || '0000000000000000000000000000000000000000000000000000000000000000', 1, 64),
+  'local-fixture/l10n/welcome/' || locale || '/' || device || '-shortened.png', 'image/png', 1, width, height
+  FROM locales, devices;
+
+WITH
+  locales(locale) AS (VALUES ('en'), ('de'), ('fr'), ('ja')),
+  devices(device) AS (VALUES ('iPhone15'), ('iPadPro11'))
+INSERT OR IGNORE INTO screenshots (organization_id, run_id, shard_id, name, image_id)
+SELECT 'org_local', 'run_local_demo', 'shd_local_demo', 'Onboarding/Welcome.' || locale || '-' || device || '.png',
+  'img_local_l10n_welcome_' || locale || '_' || device || CASE WHEN locale IN ('de', 'fr') THEN '_shortened' ELSE '' END
+  FROM locales, devices;
+
+WITH
+  locales(locale) AS (VALUES ('de'), ('fr')),
+  devices(device) AS (VALUES ('iPhone15'), ('iPadPro11'))
+INSERT INTO comparison_entries (organization_id, comparison_id, name, kind, baseline_image_id, current_image_id)
+SELECT 'org_local', 'cmp_local_demo', 'Onboarding/Welcome.' || locale || '-' || device || '.png', 'changed',
+  'img_local_l10n_welcome_' || locale || '_' || device, 'img_local_l10n_welcome_' || locale || '_' || device || '_shortened'
+  FROM locales, devices
+ WHERE true
+ON CONFLICT (organization_id, comparison_id, name) DO UPDATE SET
+  kind = excluded.kind,
+  baseline_image_id = excluded.baseline_image_id,
+  current_image_id = excluded.current_image_id;
+
+UPDATE runs SET screenshot_count = (
+  SELECT COUNT(*) FROM screenshots WHERE organization_id = 'org_local' AND run_id = 'run_local_demo'
+) WHERE id = 'run_local_demo' AND organization_id = 'org_local';
+
+UPDATE comparisons SET changed_count = (
+  SELECT COUNT(*) FROM comparison_entries WHERE organization_id = 'org_local' AND comparison_id = 'cmp_local_demo' AND kind = 'changed'
+), unchanged_count = 4
+WHERE id = 'cmp_local_demo' AND organization_id = 'org_local';

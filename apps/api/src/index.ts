@@ -16,6 +16,7 @@ import {
 import { decideComparison, getComparison } from "./reports.ts";
 import { exchangeGitHubOidc } from "./github-oidc.ts";
 import { getDashboardRun, getPrivateImage, listProjectRuns } from "./dashboard.ts";
+import { listProjectScreens } from "./screens.ts";
 import {
   controlBaseline, createWorkspaceToken, getProjectOperations, listMembers, listWorkspaceTokens,
   revokeToken, rotateToken, updateMember, updateProjectSettings,
@@ -136,6 +137,10 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     }
     const runHistoryMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/run-history$/);
     if (runHistoryMatch?.[1] && request.method === "GET") return listProjectRuns(env, session, runHistoryMatch[1], url.searchParams.get("before"));
+    const screensMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/screens$/);
+    if (screensMatch?.[1] && request.method === "GET") {
+      return listProjectScreens(env, session, screensMatch[1], url.searchParams.get("run"), url.searchParams.get("after"));
+    }
     const dashboardRunMatch = url.pathname.match(/^\/api\/v1\/dashboard\/runs\/([A-Za-z0-9_]+)$/);
     if (dashboardRunMatch?.[1] && request.method === "GET") return getDashboardRun(env, session, dashboardRunMatch[1]);
     const imageMatch = url.pathname.match(/^\/api\/v1\/images\/([A-Za-z0-9_]+)\/content$/);
