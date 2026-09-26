@@ -17,6 +17,9 @@ const initialState = () => ({
   viewerGeneration: 0,
   routeGeneration: 0,
   comparisonId: null,
+  screens: null,
+  screenFit: true,
+  keyHandler: null,
 });
 
 export const state = initialState();
@@ -51,6 +54,12 @@ export function header(content, full = false) {
   const mobileKeySettings = state.me?.user.role === "admin" ? `<a href="/settings/tokens" data-link>Keys</a>` : "";
   const account = state.me ? `<div class="sidebar-account"><span class="avatar">${escapeHtml(initial)}</span><span class="account-copy"><strong>${escapeHtml(email)}</strong><small>${escapeHtml(state.me.user.role)}</small></span><button data-logout aria-label="Sign out" title="Sign out">${icon("logout")}</button></div>` : "";
   return `<div class="shell"><aside class="app-sidebar"><a class="brand" href="/" data-link><span class="brand-mark">${icon("brand")}</span><span>SnappyDiff</span></a><nav class="primary-nav" aria-label="Main navigation"><a class="nav-item ${projectsActive ? "active" : ""}" href="/" data-link><span class="nav-icon">${icon("projects")}</span><span>Projects</span></a></nav><div class="sidebar-spacer"></div><nav class="secondary-nav" aria-label="Workspace navigation">${keySettings}</nav>${account}</aside><div class="app-frame"><header class="mobile-topbar"><a class="brand" href="/" data-link><span class="brand-mark">${icon("brand")}</span><span>SnappyDiff</span></a><nav class="mobile-nav" aria-label="Mobile navigation"><a href="/" data-link>Projects</a>${mobileKeySettings}<button data-logout>Sign out</button></nav></header><main class="page ${full ? "page-review" : ""}">${content}</main></div></div>`;
+}
+
+export function projectTabs(projectId, active) {
+  const base = `/projects/${encodeURIComponent(projectId)}`;
+  const tab = (key, label, href) => `<a class="tab ${active === key ? "active" : ""}" href="${href}" data-link ${active === key ? `aria-current="page"` : ""}>${label}</a>`;
+  return `<nav class="tabs" aria-label="Project sections">${tab("runs", "Runs", base)}${tab("screens", "Screens", `${base}/screens`)}</nav>`;
 }
 
 function icon(name) {

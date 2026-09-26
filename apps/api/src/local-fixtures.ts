@@ -8,7 +8,13 @@ const fixtureNames = new Set([
   "local-fixture/new-current.png",
 ]);
 
+const localizedFixture = /^local-fixture\/l10n\/(welcome|account|summary)\/(en|de|fr|ja)\/(iPhone15|iPadPro11)(-shortened)?\.png$/;
+const localeTextScale: Record<string, number> = { en: 1, de: 1.38, fr: 1.2, ja: .72 };
+const deviceSizes: Record<string, readonly [number, number]> = { iPhone15: [393, 852], iPadPro11: [834, 1194] };
+
 export async function localFixturePng(storageKey: string): Promise<Uint8Array | null> {
+  const localized = storageKey.match(localizedFixture);
+  if (localized?.[1] && localized[2] && localized[3]) return localizedFixturePng(localized[1], localized[2], localized[3], Boolean(localized[4]));
   if (!fixtureNames.has(storageKey)) return null;
   const pixels = new Uint8Array(HEIGHT * (1 + WIDTH * 4));
   for (let y = 0; y < HEIGHT; y++) pixels[y * (1 + WIDTH * 4)] = 0;
@@ -54,6 +60,40 @@ export async function localFixturePng(storageKey: string): Promise<Uint8Array | 
   }
   fill(228, 530, baseline ? 116 : 138, 38, baseline ? [47, 54, 63, 255] : [217, 255, 87, 255]);
   return encodePng(pixels, WIDTH, HEIGHT);
+}
+
+function localizedFixturePng(screen: string, locale: string, device: string, shortened: boolean): Promise<Uint8Array> {
+  const [width, height] = deviceSizes[device] ?? [393, 852];
+  const scale = Math.min(localeTextScale[locale] ?? 1, shortened ? 1 : Infinity);
+  const pixels = new Uint8Array(height * (1 + width * 4));
+  const fill = (x: number, y: number, fillWidth: number, fillHeight: number, color: readonly number[]) => {
+    for (let row = Math.max(0, y); row < Math.min(height, y + fillHeight); row++) {
+      for (let column = Math.max(0, x); column < Math.min(width, x + fillWidth); column++) pixels.set(color, row * (1 + width * 4) + 1 + column * 4);
+    }
+  };
+  const text = (x: number, y: number, baseWidth: number, size: number, color: readonly number[]) => fill(x, y, Math.round(baseWidth * scale), size, color);
+  const margin = Math.round(width * .06);
+  const content = width - margin * 2;
+  fill(0, 0, width, height, [247, 247, 243, 255]);
+  fill(0, 0, width, 104, [255, 255, 255, 255]);
+  text(margin, 64, content * .42, 22, [24, 27, 31, 255]);
+  const accent = screen === "welcome" ? [92, 122, 90, 255] : screen === "account" ? [74, 104, 140, 255] : [168, 108, 52, 255];
+  if (screen === "welcome") fill(margin, 150, content, Math.round(content * .56), [224, 230, 220, 255]);
+  const listTop = screen === "welcome" ? 190 + Math.round(content * .56) : 150;
+  const rows = screen === "summary" ? 5 : 4;
+  for (let index = 0; index < rows; index++) {
+    const y = listTop + index * 64;
+    fill(margin, y, content, 52, [255, 255, 255, 255]);
+    text(margin + 16, y + 14, content * (.34 + (index % 3) * .08), 12, [52, 57, 64, 255]);
+    fill(margin + 16, y + 34, Math.round(content * .22), 7, [170, 175, 170, 255]);
+    if (screen === "summary") fill(margin + content - 72, y + 16, 56, 12, [52, 57, 64, 255]);
+  }
+  const buttonWidth = Math.min(content, 320);
+  const buttonTop = height - 128;
+  fill(Math.round((width - buttonWidth) / 2), buttonTop, buttonWidth, 52, accent);
+  const label = Math.round(buttonWidth * .78 * scale);
+  fill(Math.round((width - label) / 2), buttonTop + 20, label, 12, [255, 255, 255, 255]);
+  return encodePng(pixels, width, height);
 }
 
 async function encodePng(raw: Uint8Array, width: number, height: number): Promise<Uint8Array> {

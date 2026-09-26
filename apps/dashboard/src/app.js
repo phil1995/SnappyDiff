@@ -1,7 +1,8 @@
 import { configureUploadStep, createKeyStep, findNewProject, oidcUploadWorkflow, waitForUploadStep } from "./upload-setup.js";
 import { disposeViewer, renderComparison, renderRun, selectEntry, selectNextEntry } from "./comparison-view.js";
+import { renderScreens, renderScreenViewer } from "./screens-view.js";
 import { renderSettings } from "./settings-view.js";
-import { api, escapeHtml, formatDate, header, initializeUI, root, settingsAction, shortSha, state } from "./ui.js";
+import { api, escapeHtml, formatDate, header, initializeUI, projectTabs, root, settingsAction, shortSha, state } from "./ui.js";
 
 initializeUI();
 
@@ -12,6 +13,7 @@ function errorPage(error) {
 async function route() {
   const routeGeneration = ++state.routeGeneration;
   disposeViewer();
+  state.keyHandler = null;
   root.innerHTML = `<main class="center"><div class="spinner" aria-label="Loading"></div></main>`;
   try {
     if (!state.me) state.me = await api("/api/v1/me");
@@ -23,10 +25,14 @@ async function route() {
     const project = path.match(/^\/projects\/([^/]+)$/);
     const projectSetup = path.match(/^\/projects\/([^/]+)\/setup$/);
     const projectSettings = path.match(/^\/projects\/([^/]+)\/settings$/);
+    const projectScreens = path.match(/^\/projects\/([^/]+)\/screens$/);
+    const screenViewer = path.match(/^\/projects\/([^/]+)\/screens\/view$/);
     const run = path.match(/^\/runs\/([^/]+)$/);
     const comparison = path.match(/^\/comparisons\/([^/]+)$/);
     if (projectSetup) return await renderProjectSetup(projectSetup[1], routeGeneration);
     if (projectSettings) return await renderSettings(projectSettings[1], routeGeneration);
+    if (projectScreens) return await renderScreens(projectScreens[1], routeGeneration);
+    if (screenViewer) return await renderScreenViewer(screenViewer[1], routeGeneration);
     if (project) return await renderProject(project[1], routeGeneration);
     if (run) return await renderRun(run[1], routeGeneration, navigate);
     if (comparison) return await renderComparison(comparison[1], routeGeneration);
@@ -158,7 +164,7 @@ async function renderProject(projectId, routeGeneration) {
   if (routeGeneration !== state.routeGeneration) return;
   const rows = runs.map(runRow).join("");
   const settings = state.me.user.role === "admin" ? `<a class="button" href="/projects/${encodeURIComponent(projectId)}/settings" data-link>Project settings</a>` : "";
-  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>${escapeHtml(project.name)}</span></nav><span class="eyebrow">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</span><div class="title-row"><h1>${escapeHtml(project.name)}</h1>${settings}</div><div class="section-head"><h2>Recent runs</h2><span class="muted">Newest first</span></div>${rows ? `<div class="run-list" id="run-list">${rows}</div>${nextCursor ? `<button class="button" data-runs-more="${escapeHtml(nextCursor)}">Load older runs</button>` : ""}` : `<div class="empty">No screenshot runs have arrived for this project.</div>`}`);
+  root.innerHTML = header(`<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><span>${escapeHtml(project.name)}</span></nav><span class="eyebrow">${escapeHtml(project.repositoryOwner)}/${escapeHtml(project.repositoryName)}</span><div class="title-row"><h1>${escapeHtml(project.name)}</h1>${settings}</div>${projectTabs(projectId, "runs")}<div class="section-head"><h2>Recent runs</h2><span class="muted">Newest first</span></div>${rows ? `<div class="run-list" id="run-list">${rows}</div>${nextCursor ? `<button class="button" data-runs-more="${escapeHtml(nextCursor)}">Load older runs</button>` : ""}` : `<div class="empty">No screenshot runs have arrived for this project.</div>`}`);
   if (!rows && state.me.user.role === "admin") {
     root.querySelector(".empty")?.insertAdjacentHTML("beforeend", `<p><a class="button primary" href="/projects/${encodeURIComponent(projectId)}/setup" data-link>Configure CI upload</a></p>`);
   }
@@ -192,7 +198,8 @@ document.addEventListener("click", (event) => {
   if (logout) api("/auth/logout", { method: "POST" }).finally(() => { state.me = null; location.assign("/"); });
 });
 document.addEventListener("keydown", (event) => {
-  if (["INPUT", "TEXTAREA"].includes(event.target.tagName)) return;
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName) || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (state.keyHandler) return state.keyHandler(event);
   if (["ArrowDown", "j", "J"].includes(event.key)) { event.preventDefault(); selectNextEntry(); }
   if (["ArrowUp", "k", "K"].includes(event.key)) { event.preventDefault(); selectEntry(state.selected - 1); }
 });
