@@ -1,5 +1,6 @@
 import { configureUploadStep, createKeyStep, findNewProject, oidcUploadWorkflow, waitForUploadStep } from "./upload-setup.js";
 import { disposeViewer, renderComparison, renderRun, selectEntry, selectNextEntry } from "./comparison-view.js";
+import { renderFeedback } from "./feedback-view.js";
 import { renderScreens, renderScreenViewer } from "./screens-view.js";
 import { renderSettings } from "./settings-view.js";
 import { api, escapeHtml, formatDate, header, initializeUI, projectTabs, root, settingsAction, shortSha, state } from "./ui.js";
@@ -27,12 +28,14 @@ async function route() {
     const projectSettings = path.match(/^\/projects\/([^/]+)\/settings$/);
     const projectScreens = path.match(/^\/projects\/([^/]+)\/screens$/);
     const screenViewer = path.match(/^\/projects\/([^/]+)\/screens\/view$/);
+    const projectFeedback = path.match(/^\/projects\/([^/]+)\/feedback$/);
     const run = path.match(/^\/runs\/([^/]+)$/);
     const comparison = path.match(/^\/comparisons\/([^/]+)$/);
     if (projectSetup) return await renderProjectSetup(projectSetup[1], routeGeneration);
     if (projectSettings) return await renderSettings(projectSettings[1], routeGeneration);
     if (projectScreens) return await renderScreens(projectScreens[1], routeGeneration);
     if (screenViewer) return await renderScreenViewer(screenViewer[1], routeGeneration);
+    if (projectFeedback) return await renderFeedback(projectFeedback[1], routeGeneration);
     if (project) return await renderProject(project[1], routeGeneration);
     if (run) return await renderRun(run[1], routeGeneration, navigate);
     if (comparison) return await renderComparison(comparison[1], routeGeneration);

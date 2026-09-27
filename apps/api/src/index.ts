@@ -18,6 +18,9 @@ import { exchangeGitHubOidc } from "./github-oidc.ts";
 import { getDashboardRun, getPrivateImage, listProjectRuns } from "./dashboard.ts";
 import { listProjectScreens } from "./screens.ts";
 import {
+  createComment, createReply, deleteComment, deleteReply, getComment, listComments, summarizeComments, updateComment,
+} from "./comments.ts";
+import {
   controlBaseline, createWorkspaceToken, getProjectOperations, listMembers, listWorkspaceTokens,
   revokeToken, rotateToken, updateMember, updateProjectSettings,
 } from "./management.ts";
@@ -141,6 +144,23 @@ async function handle(request: Request, env: Env, context: RequestContext, execu
     if (screensMatch?.[1] && request.method === "GET") {
       return listProjectScreens(env, session, screensMatch[1], url.searchParams.get("run"), url.searchParams.get("after"));
     }
+    const projectCommentsMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/comments$/);
+    if (projectCommentsMatch?.[1]) {
+      if (request.method === "GET") return listComments(env, session, projectCommentsMatch[1], url.searchParams);
+      if (request.method === "POST") return createComment(request, env, session, projectCommentsMatch[1], context);
+    }
+    const commentSummaryMatch = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_]+)\/comment-summary$/);
+    if (commentSummaryMatch?.[1] && request.method === "GET") return summarizeComments(env, session, commentSummaryMatch[1]);
+    const commentMatch = url.pathname.match(/^\/api\/v1\/comments\/([A-Za-z0-9_]+)$/);
+    if (commentMatch?.[1]) {
+      if (request.method === "GET") return getComment(env, session, commentMatch[1]);
+      if (request.method === "PATCH") return updateComment(request, env, session, commentMatch[1], context);
+      if (request.method === "DELETE") return deleteComment(env, session, commentMatch[1], context);
+    }
+    const replyCreateMatch = url.pathname.match(/^\/api\/v1\/comments\/([A-Za-z0-9_]+)\/replies$/);
+    if (replyCreateMatch?.[1] && request.method === "POST") return createReply(request, env, session, replyCreateMatch[1], context);
+    const replyMatch = url.pathname.match(/^\/api\/v1\/comment-replies\/([A-Za-z0-9_]+)$/);
+    if (replyMatch?.[1] && request.method === "DELETE") return deleteReply(env, session, replyMatch[1], context);
     const dashboardRunMatch = url.pathname.match(/^\/api\/v1\/dashboard\/runs\/([A-Za-z0-9_]+)$/);
     if (dashboardRunMatch?.[1] && request.method === "GET") return getDashboardRun(env, session, dashboardRunMatch[1]);
     const imageMatch = url.pathname.match(/^\/api\/v1\/images\/([A-Za-z0-9_]+)\/content$/);
