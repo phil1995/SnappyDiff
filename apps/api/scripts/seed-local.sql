@@ -145,3 +145,30 @@ UPDATE comparisons SET changed_count = (
   SELECT COUNT(*) FROM comparison_entries WHERE organization_id = 'org_local' AND comparison_id = 'cmp_local_demo' AND kind = 'changed'
 ), unchanged_count = 4
 WHERE id = 'cmp_local_demo' AND organization_id = 'org_local';
+
+-- Demo feedback for the Screens viewer and the Feedback inbox.
+INSERT OR IGNORE INTO users (id, workos_user_id, email, display_name)
+VALUES ('usr_local_translator', 'usr_local_translator_workos', 'translator@snappydiff.dev', 'Camille (FR translator)');
+
+INSERT OR IGNORE INTO memberships (organization_id, user_id, role, status)
+VALUES ('org_local', 'usr_local_translator', 'viewer', 'active');
+
+INSERT OR IGNORE INTO screen_comments
+  (id, organization_id, project_id, screenshot_name, run_id, image_id, region_x, region_y, region_width, region_height,
+   category, body, suggested_text, status, author_user_id, status_changed_by_user_id, status_changed_at, created_at, updated_at)
+VALUES
+  ('cmt_local_de_button', 'org_local', 'prj_local_demo', 'Onboarding/Welcome.de-iPhone15.png', 'run_local_baseline',
+   'img_local_l10n_welcome_de_iPhone15', .06, .835, .88, .09, 'truncation',
+   'The German button label runs past the edges of the button.', 'Los geht’s', 'open', 'usr_local', NULL, NULL,
+   unixepoch() - 7200, unixepoch() - 7200),
+  ('cmt_local_fr_title', 'org_local', 'prj_local_demo', 'Settings/Account.fr-iPadPro11.png', 'run_local_baseline',
+   'img_local_l10n_account_fr_iPadPro11', .04, .045, .5, .05, 'translation',
+   'The title should use the informal register we agreed on for French.', 'Ton compte', 'open', 'usr_local_translator', NULL, NULL,
+   unixepoch() - 5400, unixepoch() - 3000),
+  ('cmt_local_ja_total', 'org_local', 'prj_local_demo', 'Checkout/Summary.ja-iPhone15.png', 'run_local_baseline',
+   'img_local_l10n_summary_ja_iPhone15', NULL, NULL, NULL, NULL, 'layout',
+   'Prices look cramped next to the Japanese labels.', NULL, 'resolved', 'usr_local_translator', 'usr_local', unixepoch() - 1800,
+   unixepoch() - 86400, unixepoch() - 1800);
+
+INSERT OR IGNORE INTO screen_comment_replies (id, organization_id, comment_id, body, author_user_id, created_at)
+VALUES ('rpl_local_fr_title', 'org_local', 'cmt_local_fr_title', 'Agreed — I will update the strings catalog.', 'usr_local', unixepoch() - 3000);

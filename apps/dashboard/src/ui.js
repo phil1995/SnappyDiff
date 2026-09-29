@@ -19,6 +19,7 @@ const initialState = () => ({
   comparisonId: null,
   screens: null,
   screenFit: true,
+  screenViewerGeneration: 0,
   keyHandler: null,
 });
 
@@ -59,7 +60,7 @@ export function header(content, full = false) {
 export function projectTabs(projectId, active) {
   const base = `/projects/${encodeURIComponent(projectId)}`;
   const tab = (key, label, href) => `<a class="tab ${active === key ? "active" : ""}" href="${href}" data-link ${active === key ? `aria-current="page"` : ""}>${label}</a>`;
-  return `<nav class="tabs" aria-label="Project sections">${tab("runs", "Runs", base)}${tab("screens", "Screens", `${base}/screens`)}</nav>`;
+  return `<nav class="tabs" aria-label="Project sections">${tab("runs", "Runs", base)}${tab("screens", "Screens", `${base}/screens`)}${tab("feedback", "Feedback", `${base}/feedback`)}</nav>`;
 }
 
 function icon(name) {

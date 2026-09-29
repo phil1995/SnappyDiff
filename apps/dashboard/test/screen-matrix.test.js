@@ -47,7 +47,8 @@ test("resolves viewer state and drops a comparison with the same locale", () => 
   assert.equal(viewer.compare, null);
   assert.deepEqual(viewer.locales, ["en", "de"]);
   assert.equal(viewer.groups.length, 3);
-  const fallback = screenViewerState("?screen=Unknown.png", matrix);
+  assert.equal(screenViewerState("?screen=Unknown.png", matrix).group, null);
+  const fallback = screenViewerState("", matrix);
   assert.equal(fallback.group.key, "Onboarding/Welcome.png");
   assert.equal(fallback.locale, "en");
 });

@@ -45,23 +45,25 @@ export function parseScreenFilters(search, matrix) {
 export function screenViewerState(search, matrix) {
   const parameters = new URLSearchParams(search);
   const groups = [...matrix.localized, ...matrix.other];
-  const index = Math.max(0, groups.findIndex((group) => group.key === parameters.get("screen")));
+  const requested = parameters.get("screen");
+  const index = requested ? groups.findIndex((group) => group.key === requested) : 0;
   const group = groups[index] ?? null;
   const locales = orderLocales(group?.variants.map((variant) => variant.locale) ?? []);
   const devices = orderDevices(group?.variants.map((variant) => variant.device) ?? []);
   const locale = locales.includes(parameters.get("locale")) ? parameters.get("locale") : locales[0] ?? null;
   const device = devices.includes(parameters.get("device")) ? parameters.get("device") : devices[0] ?? null;
   const compare = locales.includes(parameters.get("compare")) && parameters.get("compare") !== locale ? parameters.get("compare") : null;
-  return { run: parameters.get("run"), groups, index, group, locales, devices, locale, device, compare };
+  return { run: parameters.get("run"), comment: parameters.get("comment"), groups, index, group, locales, devices, locale, device, compare };
 }
 
-export function screenViewerSearch({ run, screen, locale, device, compare }) {
+export function screenViewerSearch({ run, screen, locale, device, compare, comment }) {
   const parameters = new URLSearchParams();
   if (run) parameters.set("run", run);
   if (screen) parameters.set("screen", screen);
   if (locale) parameters.set("locale", locale);
   if (device) parameters.set("device", device);
   if (compare) parameters.set("compare", compare);
+  if (comment) parameters.set("comment", comment);
   const search = parameters.toString();
   return search ? `?${search}` : "";
 }

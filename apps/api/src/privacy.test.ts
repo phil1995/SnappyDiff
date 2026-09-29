@@ -26,7 +26,7 @@ describe("organization privacy operations", () => {
     const response = await exportOrganization({ DB: { prepare: () => statement } } as never, admin);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("cache-control"), "no-store");
-    assert.equal(bindings.length, 7);
+    assert.equal(bindings.length, 9);
     assert.ok(bindings.every((values) => values.length === 1 && values[0] === admin.organizationId));
   });
 

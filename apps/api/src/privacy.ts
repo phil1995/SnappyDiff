@@ -8,7 +8,7 @@ const RECOVERY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 
 export async function exportOrganization(env: Env, session: Session): Promise<Response> {
   requirePermission(session, "projects:admin");
-  const [organization, members, projects, runs, comparisons, decisions, auditEvents] = await Promise.all([
+  const [organization, members, projects, runs, comparisons, decisions, comments, commentReplies, auditEvents] = await Promise.all([
     env.DB.prepare("SELECT id, workos_organization_id, slug, name, created_at, updated_at FROM organizations WHERE id = ?")
       .bind(session.organizationId).first(),
     env.DB.prepare(`SELECT u.email, u.display_name, m.role, m.status, m.created_at, m.updated_at
@@ -25,6 +25,13 @@ export async function exportOrganization(env: Env, session: Session): Promise<Re
       WHERE organization_id = ? ORDER BY created_at LIMIT 10000`).bind(session.organizationId).all(),
     env.DB.prepare(`SELECT comparison_id, decision, note, created_at FROM comparison_decisions
       WHERE organization_id = ? ORDER BY created_at LIMIT 10000`).bind(session.organizationId).all(),
+    env.DB.prepare(`SELECT c.id, c.project_id, c.screenshot_name, c.run_id, c.region_x, c.region_y, c.region_width,
+      c.region_height, c.category, c.body, c.suggested_text, c.status, u.email AS author_email, c.status_changed_at,
+      c.created_at, c.updated_at FROM screen_comments c JOIN users u ON u.id = c.author_user_id
+      WHERE c.organization_id = ? ORDER BY c.created_at LIMIT 10000`).bind(session.organizationId).all(),
+    env.DB.prepare(`SELECT r.id, r.comment_id, r.body, u.email AS author_email, r.created_at
+      FROM screen_comment_replies r JOIN users u ON u.id = r.author_user_id
+      WHERE r.organization_id = ? ORDER BY r.created_at LIMIT 10000`).bind(session.organizationId).all(),
     env.DB.prepare(`SELECT action, target_type, target_id, request_id, metadata_json, created_at FROM audit_events
       WHERE organization_id = ? ORDER BY created_at LIMIT 10000`).bind(session.organizationId).all(),
   ]);
@@ -32,7 +39,8 @@ export async function exportOrganization(env: Env, session: Session): Promise<Re
   const body = JSON.stringify({
     schemaVersion: 1, exportedAt: new Date().toISOString(), organization,
     members: members.results ?? [], projects: projects.results ?? [], runs: runs.results ?? [],
-    comparisons: comparisons.results ?? [], decisions: decisions.results ?? [], auditEvents: auditEvents.results ?? [],
+    comparisons: comparisons.results ?? [], decisions: decisions.results ?? [], comments: comments.results ?? [],
+    commentReplies: commentReplies.results ?? [], auditEvents: auditEvents.results ?? [],
     limits: { rowsPerCollection: 10000 },
   });
   return new Response(body, { headers: {

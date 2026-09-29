@@ -1,6 +1,6 @@
 # Privacy and data lifecycle
 
-SnappyDiff stores identity and membership data, repository coordinates, commit and CI metadata, screenshot PNGs, comparison decisions, and security audit events. It does not need repository file contents.
+SnappyDiff stores identity and membership data, repository coordinates, commit and CI metadata, screenshot PNGs, comparison decisions, screenshot feedback comments and replies, and security audit events. It does not need repository file contents.
 
 All tenant-owned records are keyed by organization. Screenshot objects are private and organization-scoped. Dashboard image responses require an authenticated membership and use `no-store` caching.
 

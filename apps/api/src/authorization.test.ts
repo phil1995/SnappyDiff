@@ -14,6 +14,12 @@ describe("role permissions", () => {
     assert.throws(() => requirePermission(session("viewer"), "reports:accept"));
   });
 
+  it("lets every role write feedback but reserves triage for reviewers and admins", () => {
+    for (const role of ["viewer", "reviewer", "admin"] as const) assert.doesNotThrow(() => requirePermission(session(role), "feedback:write"));
+    assert.throws(() => requirePermission(session("viewer"), "feedback:triage"));
+    assert.doesNotThrow(() => requirePermission(session("reviewer"), "feedback:triage"));
+  });
+
   it("reserves project administration for admins", () => {
     assert.throws(() => requirePermission(session("reviewer"), "projects:admin"));
     assert.doesNotThrow(() => requirePermission(session("admin"), "projects:admin"));
