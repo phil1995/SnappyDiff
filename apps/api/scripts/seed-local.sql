@@ -172,3 +172,27 @@ VALUES
 
 INSERT OR IGNORE INTO screen_comment_replies (id, organization_id, comment_id, body, author_user_id, created_at)
 VALUES ('rpl_local_fr_title', 'org_local', 'cmt_local_fr_title', 'Agreed — I will update the strings catalog.', 'usr_local', unixepoch() - 3000);
+
+-- Apple Watch screens exist only on watch models, so the Screens tab groups them as their own platform.
+WITH
+  screens(slug, screen) AS (VALUES ('scoreboard', 'Watch AppTests/__Snapshots__/WatchSnapshotTests/scoreboard'), ('result', 'Watch AppTests/__Snapshots__/WatchSnapshotTests/matchResult')),
+  locales(locale) AS (VALUES ('en'), ('de')),
+  devices(device, width, height) AS (VALUES ('Ultra-3', 410, 502), ('small-Watch', 324, 394))
+INSERT OR IGNORE INTO images (id, organization_id, sha256, r2_key, content_type, byte_size, width, height)
+SELECT 'img_local_watch_' || slug || '_' || locale || '_' || replace(device, '-', '_'), 'org_local',
+  substr(lower(hex('watch|' || slug || '|' || locale || '|' || device)) || '0000000000000000000000000000000000000000000000000000000000000000', 1, 64),
+  'local-fixture/l10n/' || slug || '/' || locale || '/' || device || '.png', 'image/png', 1, width, height
+  FROM screens, locales, devices;
+
+WITH
+  screens(slug, screen) AS (VALUES ('scoreboard', 'Watch AppTests/__Snapshots__/WatchSnapshotTests/scoreboard'), ('result', 'Watch AppTests/__Snapshots__/WatchSnapshotTests/matchResult')),
+  locales(locale) AS (VALUES ('en'), ('de')),
+  devices(device) AS (VALUES ('Ultra-3'), ('small-Watch'))
+INSERT OR IGNORE INTO screenshots (organization_id, run_id, shard_id, name, image_id)
+SELECT 'org_local', 'run_local_baseline', 'shd_local_baseline', screen || '.' || locale || '-' || device || '.png',
+  'img_local_watch_' || slug || '_' || locale || '_' || replace(device, '-', '_')
+  FROM screens, locales, devices;
+
+UPDATE runs SET screenshot_count = (
+  SELECT COUNT(*) FROM screenshots WHERE organization_id = 'org_local' AND run_id = 'run_local_baseline'
+) WHERE id = 'run_local_baseline' AND organization_id = 'org_local';

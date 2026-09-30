@@ -8,9 +8,9 @@ const fixtureNames = new Set([
   "local-fixture/new-current.png",
 ]);
 
-const localizedFixture = /^local-fixture\/l10n\/(welcome|account|summary)\/(en|de|fr|ja)\/(iPhone15|iPadPro11)(-shortened)?\.png$/;
+const localizedFixture = /^local-fixture\/l10n\/(welcome|account|summary|scoreboard|result)\/(en|de|fr|ja)\/(iPhone15|iPadPro11|Ultra-3|small-Watch)(-shortened)?\.png$/;
 const localeTextScale: Record<string, number> = { en: 1, de: 1.38, fr: 1.2, ja: .72 };
-const deviceSizes: Record<string, readonly [number, number]> = { iPhone15: [393, 852], iPadPro11: [834, 1194] };
+const deviceSizes: Record<string, readonly [number, number]> = { iPhone15: [393, 852], iPadPro11: [834, 1194], "Ultra-3": [410, 502], "small-Watch": [324, 394] };
 
 export async function localFixturePng(storageKey: string): Promise<Uint8Array | null> {
   const localized = storageKey.match(localizedFixture);
@@ -74,6 +74,19 @@ function localizedFixturePng(screen: string, locale: string, device: string, sho
   const text = (x: number, y: number, baseWidth: number, size: number, color: readonly number[]) => fill(x, y, Math.round(baseWidth * scale), size, color);
   const margin = Math.round(width * .06);
   const content = width - margin * 2;
+  if (height < 600) {
+    fill(0, 0, width, height, [12, 14, 16, 255]);
+    text(margin, 28, content * .5, 18, [236, 238, 234, 255]);
+    const score = screen === "scoreboard";
+    fill(margin, 70, content, score ? 150 : 110, [34, 38, 42, 255]);
+    if (score) { fill(margin + 16, 96, content * .32, 56, [217, 255, 87, 255]); fill(width - margin - 16 - content * .32, 96, content * .32, 56, [236, 238, 234, 255]); }
+    else text(margin + 14, 90, content * .6, 14, [236, 238, 234, 255]);
+    const top = height - 92;
+    fill(margin, top, content, 48, [92, 122, 90, 255]);
+    const label = Math.round(content * .7 * scale);
+    fill(Math.round((width - label) / 2), top + 18, label, 12, [255, 255, 255, 255]);
+    return encodePng(pixels, width, height);
+  }
   fill(0, 0, width, height, [247, 247, 243, 255]);
   fill(0, 0, width, 104, [255, 255, 255, 255]);
   text(margin, 64, content * .42, 22, [24, 27, 31, 255]);
