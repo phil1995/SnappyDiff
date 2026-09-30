@@ -1,6 +1,6 @@
 import { mountComments } from "./comments-panel.js";
 import { commentLocation } from "./feedback.js";
-import { buildScreenMatrix, parseScreenFilters, screenMatches, screenVariant, screenViewerSearch, screenViewerState } from "./screen-matrix.js";
+import { buildScreenMatrix, parseScreenFilters, screenLabel, screenMatches, screenVariant, screenViewerSearch, screenViewerState } from "./screen-matrix.js";
 import { api, escapeHtml, formatDate, header, projectTabs, root, shortSha, state } from "./ui.js";
 
 const sourceLabels = {
@@ -53,54 +53,80 @@ export async function renderScreens(projectId, routeGeneration) {
     return;
   }
   const empty = !matrix.localized.length && !matrix.other.length;
-  const controls = matrix.localized.length ? screenControls(matrix, filters) : "";
-  root.innerHTML = header(`${heading}${sourceSummary(project.id, source, run)}${empty ? `<div class="empty">This run has no screenshots.</div>` : `${controls}<div id="screen-grid"></div><div id="screen-other"></div>`}`);
+  root.innerHTML = header(`${heading}${sourceSummary(project.id, source, run)}${empty ? `<div class="empty">This run has no screenshots.</div>` : `<div id="screen-controls"></div><div id="screen-grid"></div><div id="screen-other"></div>`}`);
   if (empty) return;
+  const platformOf = () => matrix.platforms.find((platform) => platform.key === filters.platform) ?? null;
   const render = () => {
+    const controls = root.querySelector("#screen-controls");
+    if (controls) controls.innerHTML = matrix.localized.length ? screenControls(matrix, filters, platformOf()) : "";
     renderGrid(project.id, matrix, filters, openComments);
     renderOther(project.id, matrix, filters, openComments);
   };
   render();
-  const sync = () => history.replaceState({}, "", `${screensPath(project.id)}${screensSearch(filters, matrix)}`);
-  root.querySelector("[data-screen-search]")?.addEventListener("input", (event) => {
+  const sync = () => history.replaceState({}, "", `${screensPath(project.id)}${screensSearch(filters, matrix, platformOf())}`);
+  const controls = root.querySelector("#screen-controls");
+  controls.addEventListener("input", (event) => {
+    if (!event.target.matches("[data-screen-search]")) return;
     filters.query = event.target.value;
     sync();
     applySearch(filters.query);
   });
-  root.querySelector("[data-screen-device]")?.addEventListener("change", (event) => {
+  controls.addEventListener("change", (event) => {
+    if (!event.target.matches("[data-screen-device]")) return;
     filters.device = event.target.value;
     sync();
     render();
   });
-  root.querySelector("[data-locale-chips]")?.addEventListener("click", (event) => {
+  controls.addEventListener("click", (event) => {
+    const platformButton = event.target.closest("[data-platform]");
+    if (platformButton) {
+      const platform = matrix.platforms.find((item) => item.key === platformButton.dataset.platform);
+      if (!platform || platform.key === filters.platform) return;
+      Object.assign(filters, { platform: platform.key, device: platform.devices[0] ?? null, locales: platform.locales });
+      sync();
+      render();
+      return;
+    }
     const chip = event.target.closest("[data-locale-chip]");
     if (!chip) return;
     const locale = chip.dataset.localeChip;
     const selected = new Set(filters.locales);
     if (selected.has(locale) && selected.size > 1) selected.delete(locale); else selected.add(locale);
-    filters.locales = matrix.locales.filter((value) => selected.has(value));
-    root.querySelectorAll("[data-locale-chip]").forEach((button) => button.setAttribute("aria-pressed", String(selected.has(button.dataset.localeChip))));
+    filters.locales = (platformOf()?.locales ?? matrix.locales).filter((value) => selected.has(value));
     sync();
     render();
   });
 }
 
-function screensSearch(filters, matrix) {
+function screensSearch(filters, matrix, platform) {
   const parameters = new URLSearchParams();
+  const devices = platform?.devices ?? matrix.devices;
+  const locales = platform?.locales ?? matrix.locales;
   if (filters.run) parameters.set("run", filters.run);
   if (filters.query) parameters.set("q", filters.query);
-  if (filters.device && filters.device !== matrix.devices[0]) parameters.set("device", filters.device);
-  if (filters.locales.length !== matrix.locales.length) parameters.set("locales", filters.locales.join(","));
+  if (platform && platform.key !== matrix.platforms[0]?.key) parameters.set("platform", platform.key);
+  if (filters.device && filters.device !== devices[0]) parameters.set("device", filters.device);
+  if (filters.locales.length !== locales.length) parameters.set("locales", filters.locales.join(","));
   const search = parameters.toString();
   return search ? `?${search}` : "";
 }
 
-function screenControls(matrix, filters) {
-  const devices = matrix.devices.length > 1
-    ? `<label class="screens-device">Device<select data-screen-device>${matrix.devices.map((device) => `<option value="${escapeHtml(device)}" ${device === filters.device ? "selected" : ""}>${escapeHtml(device)}</option>`).join("")}</select></label>`
+function screenControls(matrix, filters, platform) {
+  const devices = platform?.devices ?? matrix.devices;
+  const locales = platform?.locales ?? matrix.locales;
+  const platforms = matrix.platforms.length > 1
+    ? `<div class="screens-platforms"><span>Platform</span><div class="segmented" role="group" aria-label="Platform">${matrix.platforms.map((item) => `<button type="button" class="tool ${item.key === filters.platform ? "active" : ""}" data-platform="${escapeHtml(item.key)}" aria-pressed="${item.key === filters.platform}">${escapeHtml(item.label)} <span class="tool-count">${item.screens}</span></button>`).join("")}</div></div>`
     : "";
-  const chips = matrix.locales.map((locale) => `<button type="button" class="chip" data-locale-chip="${escapeHtml(locale)}" aria-pressed="${filters.locales.includes(locale)}">${escapeHtml(locale)}</button>`).join("");
-  return `<div class="screens-controls"><label class="screens-search">Search<input type="search" data-screen-search placeholder="Filter screens…" value="${escapeHtml(filters.query)}"></label>${devices}<div class="screens-locales"><span>Languages</span><div class="chips" data-locale-chips role="group" aria-label="Visible languages">${chips}</div></div></div>`;
+  const deviceSelect = devices.length > 1
+    ? `<label class="screens-device">Device<select data-screen-device>${devices.map((device) => `<option value="${escapeHtml(device)}" ${device === filters.device ? "selected" : ""}>${escapeHtml(device)}</option>`).join("")}</select></label>`
+    : "";
+  const chips = locales.map((locale) => `<button type="button" class="chip" data-locale-chip="${escapeHtml(locale)}" aria-pressed="${filters.locales.includes(locale)}">${escapeHtml(locale)}</button>`).join("");
+  return `<div class="screens-controls">${platforms}<label class="screens-search">Search<input type="search" data-screen-search placeholder="Filter screens…" value="${escapeHtml(filters.query)}"></label>${deviceSelect}<div class="screens-locales"><span>Languages</span><div class="chips" role="group" aria-label="Visible languages">${chips}</div></div></div>`;
+}
+
+function screenName(name) {
+  const { title, context } = screenLabel(name);
+  return `<span class="screen-name" title="${escapeHtml(name)}"><strong>${escapeHtml(title)}</strong>${context ? `<small>${escapeHtml(context)}</small>` : ""}</span>`;
 }
 
 function viewerLink(projectId, filters, group, locale, device) {
@@ -119,17 +145,18 @@ function thumbnail(variant, label, openComments) {
 function renderGrid(projectId, matrix, filters, openComments) {
   const container = root.querySelector("#screen-grid");
   if (!container) return;
-  if (!matrix.localized.length) { container.innerHTML = ""; return; }
+  const groups = matrix.localized.filter((group) => !filters.platform || group.platform === filters.platform);
+  if (!groups.length) { container.innerHTML = ""; return; }
   const head = filters.locales.map((locale) => `<th scope="col">${escapeHtml(locale)}</th>`).join("");
-  const rows = matrix.localized.map((group) => {
+  const rows = groups.map((group) => {
     const cells = filters.locales.map((locale) => {
       const variant = screenVariant(group, locale, filters.device);
       if (!variant) return `<td><span class="screen-missing" title="No ${escapeHtml(locale)} screenshot for ${escapeHtml(filters.device ?? "this device")}">Missing</span></td>`;
       return `<td><a class="screen-cell" href="${viewerLink(projectId, filters, group, locale, filters.device)}" data-link aria-label="${escapeHtml(`${group.name} in ${locale}`)}">${thumbnail(variant, `${group.name} · ${locale}`, openComments)}</a></td>`;
     }).join("");
-    return `<tr data-screen-name="${escapeHtml(group.name.toLowerCase())}" ${screenMatches(group, filters.query) ? "" : "hidden"}><th scope="row"><span class="screen-name">${escapeHtml(group.name)}</span></th>${cells}</tr>`;
+    return `<tr data-screen-name="${escapeHtml(group.name.toLowerCase())}" ${screenMatches(group, filters.query) ? "" : "hidden"}><th scope="row">${screenName(group.name)}</th>${cells}</tr>`;
   }).join("");
-  container.innerHTML = `<div class="section-head"><h2>Localized screens</h2><span class="muted">${matrix.localized.length} screens · ${matrix.locales.length} languages</span></div><div class="screen-matrix"><table><thead><tr><th scope="col">Screen</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  container.innerHTML = `<div class="section-head"><h2>Localized screens</h2><span class="muted">${groups.length} screens · ${filters.locales.length} languages</span></div><div class="screen-matrix"><table><thead><tr><th scope="col">Screen</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function renderOther(projectId, matrix, filters, openComments) {
@@ -138,7 +165,7 @@ function renderOther(projectId, matrix, filters, openComments) {
   if (!matrix.other.length) { container.innerHTML = ""; return; }
   const cards = matrix.other.map((group) => {
     const variant = group.variants[0];
-    return `<a class="screen-card" href="${viewerLink(projectId, filters, group, null, variant.device)}" data-link data-screen-name="${escapeHtml(group.name.toLowerCase())}" ${screenMatches(group, filters.query) ? "" : "hidden"}><span class="screen-card-image">${thumbnail(variant, group.name, openComments)}</span><span class="screen-name">${escapeHtml(group.name)}</span></a>`;
+    return `<a class="screen-card" href="${viewerLink(projectId, filters, group, null, variant.device)}" data-link data-screen-name="${escapeHtml(group.name.toLowerCase())}" ${screenMatches(group, filters.query) ? "" : "hidden"}><span class="screen-card-image">${thumbnail(variant, group.name, openComments)}</span>${screenName(group.name)}</a>`;
   }).join("");
   const title = matrix.localized.length ? "Other screens" : "Screens";
   container.innerHTML = `<div class="section-head"><h2>${title}</h2><span class="muted">${matrix.other.length} without a language suffix</span></div><div class="screen-gallery">${cards}</div>`;
@@ -158,7 +185,7 @@ export async function renderScreenViewer(projectId, routeGeneration) {
   const viewer = screenViewerState(location.search, matrix);
   const { group } = viewer;
   const gridLink = `${screensPath(project.id)}${run ? `?run=${encodeURIComponent(run)}` : ""}`;
-  const crumbs = `<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(project.id)}" data-link>${escapeHtml(project.name)}</a><span>/</span><a href="${gridLink}" data-link>Screens</a><span>/</span><span>${escapeHtml(group?.name ?? "Screen")}</span></nav>`;
+  const crumbs = `<nav class="crumbs"><a href="/" data-link>Projects</a><span>/</span><a href="/projects/${encodeURIComponent(project.id)}" data-link>${escapeHtml(project.name)}</a><span>/</span><a href="${gridLink}" data-link>Screens</a><span>/</span><span title="${escapeHtml(group?.name ?? "")}">${escapeHtml(group ? screenLabel(group.name).title : "Screen")}</span></nav>`;
   if (!group) {
     const original = viewer.comment ? await api(`/api/v1/comments/${encodeURIComponent(viewer.comment)}`).catch(() => null) : null;
     if (routeGeneration !== state.routeGeneration) return;
@@ -186,8 +213,8 @@ export async function renderScreenViewer(projectId, routeGeneration) {
   const panels = [viewer.locale, viewer.compare].filter((locale, index) => index === 0 || locale).map((locale, index) => screenPanel(group, locale, viewer.device, index === 0)).join("");
   const primary = screenVariant(group, viewer.locale, viewer.device);
   const navigation = `<div class="entry-navigation"><button class="button" data-screen-prev ${viewer.index > 0 ? "" : "disabled"}>← Previous</button><span><b>${viewer.index + 1}</b> of <b>${viewer.groups.length}</b></span><button class="button" data-screen-next ${viewer.index < viewer.groups.length - 1 ? "" : "disabled"}>Next →</button></div>`;
-  root.innerHTML = header(`${crumbs}<div class="screen-viewer-head"><div><span class="eyebrow">Screen</span><h1 class="screen-title">${escapeHtml(group.name)}</h1></div>${navigation}</div>${controls}<div class="screen-workspace"><div class="screen-panels ${viewer.compare ? "compare" : ""} ${state.screenFit ? "fit" : "actual"}">${panels}</div><aside class="comments-panel" data-comments-panel aria-label="Feedback">${primary ? `<div class="spinner"></div>` : `<p class="muted">Pick a language and device with a screenshot to see feedback.</p>`}</aside></div><p class="muted keyboard-hint">Keyboard: <kbd>j</kbd>/<kbd>k</kbd> next or previous screen · <kbd>←</kbd>/<kbd>→</kbd> switch language · <kbd>c</kbd> add comment</p>`);
-  document.title = `${group.name} · SnappyDiff`;
+  root.innerHTML = header(`${crumbs}<div class="screen-viewer-head"><div><span class="eyebrow">${escapeHtml(screenLabel(group.name).context || "Screen")}</span><h1 class="screen-title" title="${escapeHtml(group.name)}">${escapeHtml(screenLabel(group.name).title)}</h1></div>${navigation}</div>${controls}<div class="screen-workspace"><div class="screen-panels ${viewer.compare ? "compare" : ""} ${state.screenFit ? "fit" : "actual"}">${panels}</div><aside class="comments-panel" data-comments-panel aria-label="Feedback">${primary ? `<div class="spinner"></div>` : `<p class="muted">Pick a language and device with a screenshot to see feedback.</p>`}</aside></div><p class="muted keyboard-hint">Keyboard: <kbd>j</kbd>/<kbd>k</kbd> next or previous screen · <kbd>←</kbd>/<kbd>→</kbd> switch language · <kbd>c</kbd> add comment</p>`);
+  document.title = `${screenLabel(group.name).title} · SnappyDiff`;
   root.querySelector("[data-viewer-locale]")?.addEventListener("change", (event) => go({ locale: event.target.value, compare: viewer.compare === event.target.value ? null : viewer.compare }));
   root.querySelector("[data-viewer-compare]")?.addEventListener("change", (event) => go({ compare: event.target.value || null }));
   root.querySelector("[data-viewer-device]")?.addEventListener("change", (event) => go({ device: event.target.value }));

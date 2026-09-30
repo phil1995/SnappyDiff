@@ -229,3 +229,5 @@ label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; margin: 1
   .tool, .chip { min-height: 38px; } .link-button { min-height: 36px; padding: 0 4px; } .comment footer { gap: 0 8px; }
   .entry-navigation .button, .decision .button { min-height: 44px; } .keyboard-hint { display: none; }
 }
+.screen-name strong { display: block; font-weight: 700; } .screen-name small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.screens-platforms { display: grid; gap: 7px; color: var(--muted); font-size: 11px; } .tool-count { margin-left: 3px; opacity: .7; font-weight: 600; }
